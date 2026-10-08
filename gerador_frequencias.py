@@ -1,14 +1,11 @@
 """Gerador de Frequências Terapêuticas e Tons Puros — rode com: streamlit run gerador_frequencias.py"""
 import io
 import json
-import math
 import os
-import struct
 import wave
 from array import array
-from fractions import Fraction
 
-import numpy as np  # já vem com o Streamlit; usado só nas camadas de ambiente
+import numpy as np  # já vem com o Streamlit
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -38,9 +35,12 @@ ACORDES = [(1, 5 / 4, 3 / 2), (5 / 6, 1, 5 / 4), (2 / 3, 5 / 6, 1), (3 / 4, 15 /
 SINOS = (2, 9 / 4, 5 / 2, 3, 10 / 3)  # pentatônica acima da raiz
 
 PRESETS = {
+    "2 Hz — Delta: sono profundo, descanso": 2.0,
     "4.5 Hz — Theta profundo: meditação, introspecção": 4.5,
     "7.83 Hz — Ressonância Schumann: aterramento, calma": 7.83,
     "10 Hz — Alpha: relaxamento alerta, foco leve": 10.0,
+    "14 Hz — Beta: foco, atenção": 14.0,
+    "40 Hz — Gama: concentração, memória": 40.0,
     "174 Hz — Solfeggio: alívio de tensão, segurança": 174.0,
     "285 Hz — Solfeggio: restauração, bem-estar": 285.0,
     "528 Hz — Solfeggio: harmonia, 'frequência do amor'": 528.0,
@@ -113,54 +113,45 @@ def melodia(raiz: float, rng) -> np.ndarray:
     return pad
 
 
+BLOCO = RATE * 30  # o WAV é gerado e gravado em blocos de 30 s: o pico de memória fica perto do tamanho do arquivo
+
+
+def tom(freqs: list[float], idx: np.ndarray, total: int) -> np.ndarray:
+    """Os quadros `idx` do tom: float64, uma coluna por canal, pico 1, com fade nas pontas.
+    A fase sai direto do índice da amostra (float64 sobra em precisão), então não há emenda
+    entre blocos nem salto de fase, mesmo em frequências como 7.83 Hz."""
+    x = np.sin(np.outer(idx, 2 * np.pi * np.asarray(freqs, np.float64) / RATE))
+    return x * np.minimum(1, np.minimum(idx, total - 1 - idx) / FADE)[:, None]
+
+
 def gerar_wav(freqs: list[float], segundos: int, ambientes=(), vol_freq=1.0) -> bytes:
     """Uma frequência por canal: [f] = mono, [esq, dir] = estéreo (binaural).
-    Com `ambientes`, mistura as camadas por cima e a frequência fica ao fundo (`vol_freq`)."""
-    # Um bloco de `den` segundos contém um número inteiro de ciclos em todos os canais
-    # (ex.: 7.83 Hz -> 100 s), então repeti-lo é contínuo: senoide pura sem salto de fase.
-    den = math.lcm(*(Fraction(f).limit_denominator(100).denominator for f in freqs))
-    bloco_n = RATE * min(den, segundos)
-    total = RATE * segundos
-    ch = len(freqs)
-
-    amostras = array("h", bytes(2 * total * ch))
-    for c, f in enumerate(freqs):
-        w = 2 * math.pi * f / RATE
-        bloco = array("h", (round(AMP * math.sin(w * i)) for i in range(bloco_n)))
-        canal = bloco * (total // bloco_n + 1)
-        del canal[total:]
-        amostras[c::ch] = canal  # intercala L/R
-
-    for i in range(min(FADE, total // 2) * ch):
-        g = (i // ch) / FADE
-        amostras[i] = round(amostras[i] * g)
-        amostras[-1 - i] = round(amostras[-1 - i] * g)
+    Com `ambientes`, mistura as camadas por cima e a frequência fica ao fundo (`vol_freq`).
+    Gera e grava em blocos de BLOCO quadros: o pico de memória é pouco mais que o próprio WAV."""
+    total, ch = RATE * segundos, len(freqs)
+    if ambientes:
+        sinteticos = [a for a in ambientes if a not in GRAVACOES]
+        camadas = [ambiente(sinteticos, raiz_musical(freqs[0]))] if sinteticos else []
+        camadas += [gravacao(a) for a in ambientes if a in GRAVACOES]
+        escala = 1 / max(1.0, 0.8 * vol_freq + 0.8)  # pico máximo possível da soma
+        rampa = 3 * RATE  # fade de 3 s no ambiente
 
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
+        wf.setnchannels(2 if ambientes else ch)
         wf.setsampwidth(2)
         wf.setframerate(RATE)
-        if not ambientes:
-            if struct.pack("=h", 1) != struct.pack("<h", 1):  # WAV é little-endian
-                amostras.byteswap()
-            wf.setnchannels(ch)
-            wf.writeframes(amostras.tobytes())
-        else:
-            wf.setnchannels(2)
-            tom = np.frombuffer(amostras, np.int16).reshape(-1, ch)
-            sinteticos = [a for a in ambientes if a not in GRAVACOES]
-            camadas = [ambiente(sinteticos, raiz_musical(freqs[0]))] if sinteticos else []
-            camadas += [gravacao(a) for a in ambientes if a in GRAVACOES]
-            escala = 1 / max(1.0, 0.8 * vol_freq + 0.8)  # pico máximo possível da soma
-            rampa = 3 * RATE  # fade de 3 s no ambiente
-            bloco = RATE * AMB_SEG
-            for i0 in range(0, total, bloco):  # bloco a bloco: pouca memória extra
-                idx = np.arange(i0, min(total, i0 + bloco))
-                tb = tom[idx].astype(np.float32) / 32767
+        for i0 in range(0, total, BLOCO):
+            idx = np.arange(i0, min(total, i0 + BLOCO))
+            x = tom(freqs, idx, total)
+            if ambientes:
                 amb = np.tanh(sum(c[idx % len(c)] for c in camadas))  # cada loop no seu tamanho; tanh = limitador suave
                 g = np.minimum(1, np.minimum(idx, total - idx) / rampa)[:, None]
-                mix = (tb * vol_freq + 0.8 * amb * g) * escala
-                wf.writeframes((mix * 32767).astype("<i2").tobytes())
+                mix = (x * (AMP / 32767) * vol_freq + 0.8 * amb * g) * escala
+                quadros = np.rint(mix * 32767)
+            else:
+                quadros = np.rint(AMP * x)
+            wf.writeframes(quadros.astype("<i2").tobytes())  # "<i2": WAV é little-endian em qualquer máquina
     return buf.getvalue()
 
 
@@ -229,7 +220,9 @@ def main():
 
 
 def controles():
-    preset = st.selectbox("Escolha uma frequência", list(PRESETS) + ["Personalizada"])
+    opcoes = list(PRESETS) + ["Personalizada"]
+    # começa no theta (4.5 Hz), como antes de entrarem os presets de delta, beta e gama
+    preset = st.selectbox("Escolha uma frequência", opcoes, index=next(i for i, k in enumerate(opcoes) if k.startswith("4.5 Hz")))
     if preset == "Personalizada":
         freq = st.number_input("Frequência (Hz)", min_value=0.1, max_value=22000.0,
                                value=432.0, step=0.01, format="%.2f")
@@ -239,7 +232,8 @@ def controles():
     minutos = st.slider("Duração (minutos)", 1, 30, 10)
 
     # Batida binaural só faz sentido para frequências baixas (até 40 Hz, o gama); acima disso, tom puro.
-    binaural = freq <= 40 and st.toggle("Modo binaural (estéreo, use fones)", value=freq < 20)
+    # Ligado por padrão: tons de 20–40 Hz também são fracos nos alto-falantes e rendem mais como batida.
+    binaural = freq <= 40 and st.toggle("Modo binaural (estéreo, use fones)", value=True)
     if binaural:
         portadora = st.number_input("Portadora (Hz)", min_value=20.0, max_value=1000.0,
                                     value=200.0, step=1.0, format="%.2f")
@@ -370,6 +364,13 @@ if __name__ == "__main__":
             assert s[0] == 0 and max(s) <= 32767 * 0.8 + 1
         # canais diferentes no binaural: L e R divergem após o fade
         assert s[2 * FADE * 2] != s[2 * FADE * 2 + 1]
+        # emenda entre blocos: ao cruzar BLOCO (e depois 2×BLOCO) a senoide segue exata, sem salto de fase
+        raw = gerar_wav([7.83], 70)
+        with wave.open(io.BytesIO(raw)) as wf:
+            s = np.frombuffer(wf.readframes(wf.getnframes()), "<i2").astype(int)
+        for corte in (BLOCO, 2 * BLOCO):
+            i = np.arange(corte - 50, corte + 50)
+            assert np.abs(s[i] - np.rint(AMP * np.sin(2 * np.pi * 7.83 * i / RATE))).max() <= 1
         # com ambiente: estéreo, duração exata (passa da emenda do loop de 64 s), sem clipping
         raw = gerar_wav([528], 70, list(AMBIENTES.values()), 0.3)
         with wave.open(io.BytesIO(raw)) as wf:

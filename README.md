@@ -2,13 +2,13 @@
 
 Gere tons puros e batidas binaurais para relaxar, meditar e recomeçar — direto no navegador, em alta definição (16-bit · 44.1 kHz).
 
-- Presets: 4.5 Hz, 7.83 Hz (Schumann), 10 Hz, 174 Hz, 285 Hz, 528 Hz — ou qualquer frequência personalizada
+- Presets: 2 Hz (delta), 4.5 Hz (theta), 7.83 Hz (Schumann), 10 Hz (alfa), 14 Hz (beta), 40 Hz (gama), 174 Hz, 285 Hz, 528 Hz — ou qualquer frequência personalizada
 - Modo binaural para frequências até 40 Hz, incluindo o gama (use fones)
 - Duração de 1 a 30 minutos, player embutido e download em `.wav`
 - Playlist: monte uma sequência de frequências e deixe tocando sem parar, com repetição
 - Vídeo MP4 com fundo cósmico e geometria sagrada (Flor da Vida, Metatron, Merkabá, Lótus) girando devagar sobre o áudio
 - Sons de fundo com a frequência por trás: gravações reais (chuva, mar, pássaros, riacho, fogueira), sons sintéticos (chuva, ondas, vento) e uma melodia ambiente afinada no tom da frequência
-- Senoide gerada só com a biblioteca padrão do Python (`wave`, `struct`, `math`), sem ruído
+- Senoide pura, sem ruído nem salto de fase, gerada com numpy e gravada em blocos de 30 s: pouca memória mesmo em 30 minutos
 - Funciona no computador, tablet e celular
 
 ## Aviso
