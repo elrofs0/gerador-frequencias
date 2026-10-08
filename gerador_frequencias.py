@@ -24,11 +24,14 @@ LIMITE_MIN = 10 if NUVEM else 30
 
 AMBIENTES = {"🌧 Chuva (gravação real)": "chuva-real", "🌊 Mar (gravação real)": "mar-real",
              "🐦 Pássaros (gravação real)": "passaros", "💧 Riacho (gravação real)": "riacho",
+             "🔥 Fogueira (gravação real)": "fogueira",
              "🌧 Chuva (sintética)": "chuva", "🌊 Ondas (sintéticas)": "ondas",
              "🍃 Vento (sintético)": "vento", "🎹 Melodia ambiente": "melodia"}
-# Gravações CC0/domínio público do Wikimedia Commons (créditos no README), em loops sem emenda.
+# Gravações do Wikimedia Commons (CC0/domínio público; fogueira CC BY 3.0, créditos no README
+# e no rodapé), em loops sem emenda.
 PASTA_SONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-GRAVACOES = {"chuva-real": "chuva", "mar-real": "mar", "passaros": "passaros", "riacho": "riacho"}
+GRAVACOES = {"chuva-real": "chuva", "mar-real": "mar", "passaros": "passaros", "riacho": "riacho",
+             "fogueira": "fogueira"}
 AMB_SEG = 64  # o ambiente é um loop de 64 s, contínuo nas emendas
 ACORDES = [(1, 5 / 4, 3 / 2), (5 / 6, 1, 5 / 4), (2 / 3, 5 / 6, 1), (3 / 4, 15 / 16, 9 / 8)]  # I vi IV V
 SINOS = (2, 9 / 4, 5 / 2, 3, 10 / 3)  # pentatônica acima da raiz
@@ -217,7 +220,8 @@ def main():
     if st.session_state.get("playlist"):
         with st.container(border=True):
             playlist()
-    st.caption("Senoide pura · 16-bit · 44.1 kHz")
+    st.caption("Senoide pura · 16-bit · 44.1 kHz · Som de fogueira: “Campfire sound ambience”, "
+               "Glaneur de sons, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/), via Wikimedia Commons")
 
 
 def controles():
