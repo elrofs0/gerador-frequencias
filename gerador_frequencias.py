@@ -12,7 +12,7 @@ import numpy as np  # já vem com o Streamlit; usado só nas camadas de ambiente
 import streamlit as st
 import streamlit.components.v1 as components
 
-from video import FFMPEG, SIMBOLOS, gerar_video
+from video import FFMPEG, SIMBOLOS, gerar_video, gerar_video_faixas
 
 RATE = 44100
 AMP = 0.8 * 32767  # headroom de ~2 dB, evita clipping
@@ -21,6 +21,7 @@ FADE = int(RATE * 0.05)  # 50 ms de fade in/out para não estalar
 # Streamlit Community Cloud roda os apps a partir de /mount/src (≈1 GB de RAM): limita o download.
 NUVEM = os.path.abspath(__file__).startswith("/mount/src/")
 LIMITE_MIN = 10 if NUVEM else 30
+LIMITE_VIDEO_MIN = 30 if NUVEM else 24 * 60  # vídeo da playlist: gerado faixa a faixa, cabe mais
 
 AMBIENTES = {"🌧 Chuva (gravação real)": "chuva-real", "🌊 Mar (gravação real)": "mar-real",
              "🐦 Pássaros (gravação real)": "passaros", "💧 Riacho (gravação real)": "riacho",
@@ -270,7 +271,8 @@ def controles():
                   else f"{freq:g} Hz") + "".join(f" + {a}" for a in escolhidos) + f" · {minutos} min"
         st.session_state.setdefault("playlist", []).append(
             {"titulo": titulo, "freqs": freqs, "seg": minutos * 60, "amb": ambientes,
-             "vol": vol_freq, "raiz": raiz_musical(freqs[0])})
+             "vol": vol_freq, "raiz": raiz_musical(freqs[0]),
+             "legenda": f"{freq:g} Hz" + (" · binaural" if binaural else "")})
     if longo:
         st.caption(f"No site, o download vai até {LIMITE_MIN} min. "
                    "Na playlist pode usar qualquer duração, ela toca direto no navegador.")
@@ -312,10 +314,22 @@ PLAYER_HTML = """
   .agora {margin:12px 0 6px; font-size:15px; min-height:20px;}
   .barra {height:6px; border-radius:6px; background:#ece2fa; overflow:hidden;}
   .barra div {height:100%; width:0; background:linear-gradient(90deg,#7b4fd6,#d19a2a);}
+  #tela {width:100%; aspect-ratio:16/9; display:block; border-radius:14px; background:#0b0620; margin-bottom:12px;}
+  #tela:fullscreen {border-radius:0;}
+  select {border:1px solid #e4d6f7; border-radius:999px; padding:8px 12px; background:#fff; color:#2e1f4a; font-size:14px;}
 </style>
+<canvas id="tela" width="1280" height="720"></canvas>
 <div class="p">
   <button id="play">▶ Tocar playlist</button>
   <button id="stop" class="sec">■ Parar</button>
+  <button id="cheia" class="sec">⛶ Tela cheia</button>
+  <select id="visual">
+    <option value="alternar">🔄 Alternar símbolos</option>
+    <option value="flor">🌸 Flor da Vida</option>
+    <option value="metatron">✡ Metatron</option>
+    <option value="merkaba">✴ Merkabá</option>
+    <option value="lotus">🪷 Lótus</option>
+  </select>
   <label><input type="checkbox" id="loop" checked> Repetir</label>
 </div>
 <div class="agora" id="agora"></div>
@@ -334,7 +348,7 @@ function tocar(i) {
   g.gain.linearRampToValueAtTime(VOL, t + FADE);
   g.gain.setValueAtTime(VOL, fim - FADE);
   g.gain.linearRampToValueAtTime(0, fim);
-  g.connect(ctx.destination);
+  g.connect(saida);
   const amb = it.amb || [], vol = it.vol ?? 1;
   const escala = 1 / Math.max(1, 0.8 * vol + (amb.length ? 0.8 : 0));
   const gTom = ganho(0.8 * vol * escala), gAmb = ganho(0.8 * escala);
@@ -350,6 +364,7 @@ function tocar(i) {
   oscs[0].onended = () => tocar(idx + 1);
   atual = {g, oscs}; inicio = t;
   $("agora").textContent = `♪ ${i + 1}/${LISTA.length} — ${it.titulo}`;
+  VIS.faixa(i, it.legenda || it.titulo.split(" · ")[0]);
 }
 
 // Camadas de ambiente (mesma receita do download, em Web Audio). Cada uma devolve
@@ -426,17 +441,129 @@ function parar() {
   atual.g.disconnect(); atual = null;
 }
 
+let saida, analisador;
 $("play").onclick = async () => {
-  ctx = ctx || new AudioContext(); ctx.resume();
+  if (!ctx) {
+    ctx = new AudioContext();
+    analisador = ctx.createAnalyser(); analisador.fftSize = 2048;
+    saida = ctx.createGain(); saida.connect(analisador); analisador.connect(ctx.destination);
+  }
+  ctx.resume();
   $("agora").textContent = "Carregando sons...";
   try { await carregar(LISTA.flatMap(it => it.amb || [])); }
   catch (e) { $("agora").textContent = "Não foi possível carregar as gravações."; return; }
   tocar(0);
 };
-$("stop").onclick = () => { parar(); $("agora").textContent = ""; $("prog").style.width = 0; };
+$("stop").onclick = () => { parar(); $("agora").textContent = ""; $("prog").style.width = 0; VIS.faixa(-1, ""); };
 setInterval(() => {
   if (atual) $("prog").style.width = Math.min(100, (ctx.currentTime - inicio) / LISTA[idx].seg * 100) + "%";
 }, 500);
+
+// ---------- Visualização ao vivo (estilo Windows Media Player) ----------
+// Céu cósmico + geometria sagrada dourada girando devagar. Reage ao volume do som, mas com
+// suavização de ~2 s: nada pisca (seguro para fotossensíveis, mesmo com batidas binaurais).
+const VIS = (() => {
+  const tela = $("tela"), c = tela.getContext("2d"), W = tela.width, H = tela.height;
+  const ORDEM = ["flor", "metatron", "merkaba", "lotus"], S = 640, OURO = "#e8be5c";
+  const estrelas = Array.from({length: 220}, () => [Math.random() * W, Math.random() * H,
+                                                    0.3 + Math.random() * 0.7, Math.random() * 6.28]);
+  const cache = {};
+
+  function simbolo(nome) {  // desenhado uma vez num canvas fora da tela, com brilho
+    if (cache[nome]) return cache[nome];
+    const cv = document.createElement("canvas"); cv.width = cv.height = S;
+    const d = cv.getContext("2d"), R = S * 0.40, m = S / 2;
+    d.translate(m, m); d.strokeStyle = OURO; d.lineWidth = 2.2; d.shadowColor = "#ffcf6b"; d.shadowBlur = 14;
+    const circ = (x, y, r) => { d.beginPath(); d.arc(x, y, r, 0, 6.2832); d.stroke(); };
+    const linha = (p, q) => { d.beginPath(); d.moveTo(p[0], p[1]); d.lineTo(q[0], q[1]); d.stroke(); };
+    if (nome === "flor") {
+      const r = R / 3;
+      for (let q = -2; q <= 2; q++) for (let s = -2; s <= 2; s++)
+        if (Math.abs(q + s) <= 2) circ(r * (q + s / 2), r * s * Math.sqrt(3) / 2, r);
+      circ(0, 0, R); circ(0, 0, R + 6);
+    } else if (nome === "metatron") {
+      const r = R / 5, cs = [[0, 0]];
+      for (const k of [1, 2]) for (let i = 0; i < 6; i++) {
+        const a = Math.PI / 3 * i + Math.PI / 6; cs.push([k * 2 * r * Math.cos(a), k * 2 * r * Math.sin(a)]);
+      }
+      cs.forEach((p, i) => cs.slice(i + 1).forEach(q => linha(p, q)));
+      cs.forEach(([x, y]) => circ(x, y, r));
+    } else if (nome === "merkaba") {
+      for (const raio of [R, R / 2, R / 4]) {
+        for (const desl of [0, Math.PI]) {
+          const tri = [0, 1, 2].map(i => { const a = desl - Math.PI / 2 + 2 * Math.PI / 3 * i;
+                                           return [raio * Math.cos(a), raio * Math.sin(a)]; });
+          tri.forEach((p, i) => linha(p, tri[(i + 1) % 3]));
+        }
+        circ(0, 0, raio);
+      }
+    } else {
+      for (const [n, dist, raio] of [[8, .18, .18], [16, .45, .24], [32, .75, .18]])
+        for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; circ(R * dist * Math.cos(a), R * dist * Math.sin(a), R * raio); }
+      circ(0, 0, R); circ(0, 0, R * 0.08);
+    }
+    return cache[nome] = cv;
+  }
+
+  let atualSim = "flor", anterior = null, troca = 0, legenda = "", nivel = 0, giro = 0, ultimo = performance.now();
+  const dados = new Float32Array(2048);
+
+  function escolher(i) {
+    const v = $("visual").value;
+    return v === "alternar" ? ORDEM[Math.max(i, 0) % ORDEM.length] : v;
+  }
+  $("visual").onchange = () => faixa(idx, legenda);
+
+  function faixa(i, texto) {
+    const novo = escolher(i);
+    if (novo !== atualSim) { anterior = atualSim; atualSim = novo; troca = performance.now(); }
+    legenda = texto;
+  }
+
+  function quadro(agora) {
+    const dt = Math.min(0.1, (agora - ultimo) / 1000); ultimo = agora;
+    // volume suavizado (constante de ~2 s): acompanha o "respirar" do mar, ignora pulsos rápidos
+    if (analisador && atual) {
+      analisador.getFloatTimeDomainData(dados);
+      let s = 0; for (const x of dados) s += x * x;
+      nivel += (Math.min(1, Math.sqrt(s / dados.length) * 4) - nivel) * Math.min(1, dt / 2);
+    } else nivel += (0 - nivel) * Math.min(1, dt / 2);
+
+    const t = agora / 1000, tocando = !!atual;
+    giro += dt * (tocando ? 3 : 1.2) * Math.PI / 180;  // graus por segundo
+    const fundo = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.65);
+    fundo.addColorStop(0, `rgb(${58 + nivel * 30},${24 + nivel * 10},${104 + nivel * 30})`);
+    fundo.addColorStop(1, "#080418");
+    c.fillStyle = fundo; c.fillRect(0, 0, W, H);
+    for (const [x, y, b, f] of estrelas) {
+      c.globalAlpha = b * (0.55 + 0.45 * Math.sin(t * 0.4 + f)); c.fillStyle = "#fff"; c.fillRect(x, y, 1.6, 1.6);
+    }
+    const respira = 0.75 + 0.25 * Math.sin(2 * Math.PI * t / 10);
+    const brilho = Math.min(1, (tocando ? 0.75 : 0.45) * respira + nivel * 0.5);
+    const mistura = anterior ? Math.min(1, (agora - troca) / 2000) : 1;  // troca de símbolo em 2 s
+    const desenhar = (nome, alfa) => {
+      const img = simbolo(nome), lado = H * 0.95 * (1 + 0.03 * respira);
+      c.save(); c.translate(W / 2, H / 2); c.rotate(giro); c.globalAlpha = alfa * brilho;
+      c.globalCompositeOperation = "lighter";
+      c.drawImage(img, -lado / 2, -lado / 2, lado, lado);
+      c.globalAlpha = alfa * brilho * 0.6; c.filter = "blur(10px)";  // halo
+      c.drawImage(img, -lado / 2, -lado / 2, lado, lado);
+      c.restore();
+    };
+    if (anterior && mistura < 1) desenhar(anterior, 1 - mistura); else anterior = null;
+    desenhar(atualSim, mistura);
+    c.globalAlpha = 1; c.fillStyle = OURO; c.textAlign = "center"; c.font = "34px 'Source Sans Pro', sans-serif";
+    c.fillText(legenda, W / 2, H - 30);
+    c.textAlign = "right"; c.font = "18px 'Source Sans Pro', sans-serif"; c.fillStyle = "#a07a1f";
+    c.fillText("feito por Elrofs", W - 20, H - 16);
+    requestAnimationFrame(quadro);
+  }
+  requestAnimationFrame(quadro);
+
+  $("cheia").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : tela.requestFullscreen())
+    .catch(() => { $("agora").textContent = "Tela cheia não permitida aqui: use F11 no navegador."; });
+  return {faixa};
+})();
 </script>
 """
 
@@ -456,10 +583,37 @@ def playlist():
     html = (PLAYER_HTML.replace("__LISTA__", json.dumps(lista))
             .replace("__ACORDES__", json.dumps(ACORDES)).replace("__SINOS__", json.dumps(SINOS))
             .replace("__GRAVACOES__", json.dumps(GRAVACOES)))
-    components.html(html, height=120)
+    components.html(html, height=490)
+    if FFMPEG:
+        video_playlist(lista, total)
     if st.button("Limpar playlist"):
         lista.clear()
         st.rerun()
+
+
+def video_playlist(lista, total_min):
+    """Um MP4 com a playlist inteira: cada faixa com seu áudio, legenda e duração."""
+    assinatura = json.dumps(lista)  # muda a playlist -> o vídeo antigo deixa de valer
+    with st.expander(f"🎬 Criar vídeo da playlist ({total_min} min)"):
+        opcoes = list(SIMBOLOS) + ["🔄 Alternar a cada faixa"]
+        escolha = st.selectbox("Símbolo", opcoes, key="simbolo_playlist")
+        longo = total_min > LIMITE_VIDEO_MIN
+        if st.button("Gerar vídeo da playlist", use_container_width=True, disabled=longo):
+            nomes = list(SIMBOLOS.values())
+            faixas = [(lambda it=it: gerar_wav(it["freqs"], it["seg"], it.get("amb", []), it.get("vol", 1.0)),
+                       SIMBOLOS.get(escolha) or nomes[i % len(nomes)],
+                       it.get("legenda", it["titulo"].split(" · ")[0]))
+                      for i, it in enumerate(lista)]
+            with st.spinner(f"Criando o vídeo de {total_min} min... (cerca de 1 min a cada 10 min de playlist)"):
+                st.session_state.video_playlist = (gerar_video_faixas(faixas), assinatura)
+        if longo:
+            st.caption(f"No site, o vídeo da playlist vai até {LIMITE_VIDEO_MIN} min.")
+    if st.session_state.get("video_playlist", (None, None))[1] == assinatura:
+        mp4 = st.session_state.video_playlist[0]
+        st.video(mp4)
+        st.download_button("⬇ Baixar vídeo da playlist", mp4, file_name=f"playlist_{total_min}min.mp4",
+                           mime="video/mp4", use_container_width=True)
+        st.caption(f"{len(mp4) / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
@@ -490,6 +644,15 @@ if __name__ == "__main__":
                                    "-of", "csv=p=0", f.name], capture_output=True, text=True).stdout.split()
             os.remove(f.name)
             assert "video" in info and "audio" in info and abs(float(info[-1]) - 40) < 1, info
+            # playlist: faixa mono + faixa binaural com ambiente -> 20 s + 25 s em sequência
+            faixas = [(lambda: gerar_wav([528], 20), "flor", "528 Hz"),
+                      (lambda: gerar_wav([200, 207.83], 25, ["mar-real"], 0.3), "lotus", "7.83 Hz")]
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                f.write(gerar_video_faixas(faixas))
+            durs = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=duration",
+                                   "-of", "csv=p=0", f.name], capture_output=True, text=True).stdout.split()
+            os.remove(f.name)
+            assert all(abs(float(d) - 45) < 0.5 for d in durs), durs  # vídeo e áudio com 45 s
         print("ok")
     else:
         main()

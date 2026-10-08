@@ -4,7 +4,6 @@ Renderiza só um loop curto (LOOP_S segundos) e o ffmpeg repete esse loop pela d
 áudio sem recodificar (-stream_loop + -c:v copy): rápido mesmo para 30 minutos.
 Sem piscadas: só rotação lenta e um "respirar" de 10 s (seguro para fotossensíveis).
 """
-import io
 import math
 import os
 import shutil
@@ -143,28 +142,61 @@ def _quadros(nome, legenda):
         yield quadro.tobytes()
 
 
-def gerar_video(wav: bytes, simbolo: str, legenda: str) -> bytes:
-    """MP4 (H.264 + AAC) com a duração do áudio. Usa uma pasta temporária apagada no fim."""
+def _ffmpeg(*args, **kw):
+    return subprocess.run([FFMPEG, "-y", "-v", "error", *args], check=True, **kw)
+
+
+def _render_loop(caminho, simbolo, legenda):
+    enc = subprocess.Popen([FFMPEG, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                            "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264",
+                            "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
+                            "-g", str(FPS * 2), caminho], stdin=subprocess.PIPE)
+    for q in _quadros(simbolo, legenda):
+        enc.stdin.write(q)
+    enc.stdin.close()
+    if enc.wait():
+        raise RuntimeError("ffmpeg falhou ao gerar o loop de vídeo")
+
+
+def gerar_video_faixas(faixas) -> bytes:
+    """MP4 (H.264 + AAC) com as faixas em sequência; cada trecho dura o mesmo que o seu áudio.
+
+    `faixas`: lista de (fazer_wav, simbolo, legenda), onde fazer_wav() devolve o WAV da faixa.
+    Os áudios são gerados um por vez e vão para uma pasta temporária (apagada no fim), então a
+    memória não cresce com o tamanho da playlist.
+    """
     with tempfile.TemporaryDirectory() as tmp:
-        loop, audio, saida = (os.path.join(tmp, n) for n in ("loop.mp4", "audio.wav", "saida.mp4"))
-        with open(audio, "wb") as f:
-            f.write(wav)
-        enc = subprocess.Popen([FFMPEG, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                                "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264",
-                                "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
-                                "-g", str(FPS * 2), loop], stdin=subprocess.PIPE)
-        for q in _quadros(simbolo, legenda):
-            enc.stdin.write(q)
-        enc.stdin.close()
-        if enc.wait():
-            raise RuntimeError("ffmpeg falhou ao gerar o loop de vídeo")
-        with wave.open(io.BytesIO(wav)) as wf:
-            duracao = wf.getnframes() / wf.getframerate()
-        subprocess.run([FFMPEG, "-y", "-v", "error", "-stream_loop", "-1", "-i", loop, "-i", audio,
-                        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-                        "-t", f"{duracao:.3f}", "-movflags", "+faststart", saida], check=True)
-        with open(saida, "rb") as f:
+        p = lambda nome: os.path.join(tmp, nome)
+        loops, trechos, audios = {}, [], []
+        for i, (fazer_wav, simbolo, legenda) in enumerate(faixas):
+            audios.append(p(f"a{i}.wav"))
+            with open(audios[-1], "wb") as f:
+                f.write(fazer_wav())
+            with wave.open(audios[-1]) as wf:
+                duracao = wf.getnframes() / wf.getframerate()
+            if (simbolo, legenda) not in loops:  # faixas iguais reaproveitam o loop
+                loops[simbolo, legenda] = p(f"loop{len(loops)}.mp4")
+                _render_loop(loops[simbolo, legenda], simbolo, legenda)
+            trechos.append(f"v{i}.mp4")
+            _ffmpeg("-stream_loop", "-1", "-i", loops[simbolo, legenda], "-t", f"{duracao:.3f}",
+                    "-c", "copy", p(trechos[-1]))
+        with open(p("lista.txt"), "w") as f:
+            f.writelines(f"file '{t}'\n" for t in trechos)
+        _ffmpeg("-f", "concat", "-safe", "0", "-i", p("lista.txt"), "-c", "copy", p("video.mp4"))
+        # áudio: junta as faixas (mono ou estéreo) num único estéreo contínuo
+        n = len(audios)
+        filtro = ("".join(f"[{i + 1}:a]aformat=channel_layouts=stereo[a{i}];" for i in range(n))
+                  + "".join(f"[a{i}]" for i in range(n)) + f"concat=n={n}:v=0:a=1[a]")
+        entradas = [arg for a in audios for arg in ("-i", a)]
+        _ffmpeg("-i", p("video.mp4"), *entradas, "-filter_complex", filtro, "-map", "0:v", "-map", "[a]",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", p("saida.mp4"))
+        with open(p("saida.mp4"), "rb") as f:
             return f.read()
+
+
+def gerar_video(wav: bytes, simbolo: str, legenda: str) -> bytes:
+    """MP4 com a duração de um único áudio."""
+    return gerar_video_faixas([(lambda: wav, simbolo, legenda)])
 
 
 if __name__ == "__main__":
