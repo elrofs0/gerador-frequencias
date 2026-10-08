@@ -4,6 +4,8 @@ Gere tons puros e batidas binaurais para relaxar, meditar e recomeçar — diret
 
 - Presets: 2 Hz (delta), 4.5 Hz (theta), 7.83 Hz (Schumann), 10 Hz (alfa), 14 Hz (beta), 40 Hz (gama), 174 Hz, 285 Hz, 528 Hz — ou qualquer frequência personalizada
 - Modo binaural para frequências até 40 Hz, incluindo o gama (use fones)
+- Modo isocrônico (mesmo alcance): um tom que pulsa na frequência escolhida, funciona também no alto-falante
+- Vídeo da playlist mais rápido: o símbolo é desenhado uma vez e cada legenda é somada depois
 - Duração de 1 a 30 minutos, player embutido e download em `.wav`
 - Playlist: monte uma sequência de frequências e deixe tocando sem parar, com repetição. O player tem faixa anterior/próxima, pausar, volume, lista clicável e tempo, e as faixas se misturam suavemente (crossfade); dá para adicionar e remover faixas sem interromper o som
 - Vídeo MP4 com fundo cósmico e geometria sagrada (Flor da Vida, Metatron, Merkabá, Lótus) girando devagar sobre o áudio

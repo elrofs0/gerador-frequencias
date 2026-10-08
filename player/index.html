@@ -89,13 +89,19 @@ function tocar(i, cruzando = false) {
   const escala = 1 / Math.max(1, 0.8 * vol + (amb.length ? 0.8 : 0));
   const gTom = ganho(0.8 * vol * escala), gAmb = ganho(0.8 * escala);
   gTom.connect(g); gAmb.connect(ctx.createDynamicsCompressor()).connect(g);  // limitador do ambiente
+  const extras = [];
   const oscs = it.freqs.map((f, c) => {
     const o = ctx.createOscillator(); o.frequency.value = f;
     if (it.freqs.length === 2) {  // binaural: um tom em cada ouvido
       const p = ctx.createStereoPanner(); p.pan.value = c ? 1 : -1; o.connect(p); p.connect(gTom);
+    } else if (it.pulso) {  // isocrônico: o ganho oscila entre 0 e 1 na frequência do pulso
+      const gate = ctx.createGain(); gate.gain.value = 0.5; o.connect(gate).connect(gTom);
+      const lfo = ctx.createOscillator(); lfo.frequency.value = it.pulso;
+      lfo.connect(ganho(0.5)).connect(gate.gain); lfo.start(t); lfo.stop(fim); extras.push(lfo);
     } else o.connect(gTom);
     o.start(t); o.stop(fim); return o;
   });
+  oscs.push(...extras);
   amb.forEach(nome => oscs.push(...(CAMADAS[nome](it, gAmb, t, fim, oscs) || [])));
   // Gatilho no relógio de áudio (onended não é freado em aba em segundo plano, como os timers):
   // dispara a próxima faixa quando começa o fade de saída desta.
@@ -300,7 +306,7 @@ setInterval(() => {
 // ---------- Ligação com o Streamlit ----------
 // A lista chega a cada execução do app. A faixa que está tocando segue de onde está: só o
 // índice da próxima é reacertado (a faixa pode ter mudado de posição ou ter sido removida).
-const assinatura = it => JSON.stringify([it.freqs, it.seg, it.amb, it.vol]);
+const assinatura = it => JSON.stringify([it.freqs, it.seg, it.amb, it.vol, it.pulso]);
 const avisar = (tipo, extra) => window.parent.postMessage({isStreamlitMessage: true, type: "streamlit:" + tipo, ...extra}, "*");
 let primeira = true;
 function receber(args) {
