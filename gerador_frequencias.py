@@ -1,5 +1,6 @@
 """Gerador de Frequências Terapêuticas e Tons Puros — rode com: streamlit run gerador_frequencias.py"""
 import io
+import json
 import math
 import struct
 import wave
@@ -7,6 +8,7 @@ from array import array
 from fractions import Fraction
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 RATE = 44100
 AMP = 0.8 * 32767  # headroom de ~2 dB, evita clipping
@@ -91,6 +93,9 @@ def main():
         .marca {position:fixed; bottom:12px; right:16px; z-index:999;
                 font-size:.8rem; letter-spacing:.08em; opacity:.6;
                 color:#a07a1f; pointer-events:none; user-select:none;}
+        [class*="st-key-faixa"] [data-testid="stHorizontalBlock"] {flex-wrap:nowrap; gap:.5rem;}
+        [class*="st-key-faixa"] [data-testid="stColumn"]:first-child {flex:1 1 auto; min-width:0; width:auto;}
+        [class*="st-key-faixa"] [data-testid="stColumn"]:last-child {flex:0 0 auto; width:auto; min-width:0;}
         @media (max-width:640px) {
             .block-container {padding:1.5rem .75rem 4rem;}
             .marca {right:50%; transform:translateX(50%);}
@@ -107,6 +112,9 @@ def main():
 
     with st.container(border=True):
         controles()
+    if st.session_state.get("playlist"):
+        with st.container(border=True):
+            playlist()
     st.caption("Senoide pura · 16-bit · 44.1 kHz · gerado no seu computador, nada é enviado")
 
 
@@ -135,9 +143,15 @@ def controles():
         if freq < 20:
             st.info("Abaixo de 20 Hz o tom puro é praticamente inaudível. Ative o modo binaural.")
 
-    if st.button("Gerar áudio", type="primary", use_container_width=True):
+    col1, col2 = st.columns(2)
+    if col1.button("Gerar áudio", type="primary", use_container_width=True):
         with st.spinner(f"Gerando {minutos} min..."):
             st.session_state.audio = (gerar_wav(freqs, minutos * 60), nome)
+    if col2.button("＋ Adicionar à playlist", use_container_width=True):
+        titulo = (f"{freq:g} Hz binaural (portadora {freqs[0]:g} Hz)" if binaural
+                  else f"{freq:g} Hz") + f" · {minutos} min"
+        st.session_state.setdefault("playlist", []).append(
+            {"titulo": titulo, "freqs": freqs, "seg": minutos * 60})
 
     if "audio" in st.session_state:
         dados, nome = st.session_state.audio
@@ -145,6 +159,89 @@ def controles():
         st.download_button("⬇ Baixar " + nome, dados, file_name=nome,
                            mime="audio/wav", use_container_width=True)
         st.caption(f"{len(dados) / 1e6:.1f} MB")
+
+
+# Player da playlist: gera as senoides ao vivo no navegador (Web Audio), sem arquivos.
+# A troca de faixa é agendada no relógio de áudio (onended), então continua tocando
+# mesmo com a aba em segundo plano.
+PLAYER_HTML = """
+<style>
+  body {margin:0; font-family:'Source Sans Pro',sans-serif; color:#2e1f4a;}
+  .p {display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
+  button {border:none; border-radius:999px; padding:10px 22px; font-size:15px; font-weight:600;
+          cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b4fd6,#a35bd9);}
+  button.sec {background:#f1e9fc; color:#7b4fd6;}
+  label {font-size:14px; display:flex; align-items:center; gap:6px;}
+  .agora {margin:12px 0 6px; font-size:15px; min-height:20px;}
+  .barra {height:6px; border-radius:6px; background:#ece2fa; overflow:hidden;}
+  .barra div {height:100%; width:0; background:linear-gradient(90deg,#7b4fd6,#d19a2a);}
+</style>
+<div class="p">
+  <button id="play">▶ Tocar playlist</button>
+  <button id="stop" class="sec">■ Parar</button>
+  <label><input type="checkbox" id="loop" checked> Repetir</label>
+</div>
+<div class="agora" id="agora"></div>
+<div class="barra"><div id="prog"></div></div>
+<script>
+const LISTA = __LISTA__, VOL = 0.5, FADE = 1.5;
+let ctx, atual = null, idx = 0, inicio = 0;
+const $ = id => document.getElementById(id);
+
+function tocar(i) {
+  parar();
+  if (i >= LISTA.length) { if (!$("loop").checked) return; i = 0; }
+  idx = i; const it = LISTA[i], t = ctx.currentTime, fim = t + it.seg;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(VOL, t + FADE);
+  g.gain.setValueAtTime(VOL, fim - FADE);
+  g.gain.linearRampToValueAtTime(0, fim);
+  g.connect(ctx.destination);
+  const oscs = it.freqs.map((f, c) => {
+    const o = ctx.createOscillator(); o.frequency.value = f;
+    if (it.freqs.length === 2) {  // binaural: um tom em cada ouvido
+      const p = ctx.createStereoPanner(); p.pan.value = c ? 1 : -1; o.connect(p); p.connect(g);
+    } else o.connect(g);
+    o.start(t); o.stop(fim); return o;
+  });
+  oscs[0].onended = () => tocar(idx + 1);
+  atual = {g, oscs}; inicio = t;
+  $("agora").textContent = `♪ ${i + 1}/${LISTA.length} — ${it.titulo}`;
+}
+
+function parar() {
+  if (!atual) return;
+  atual.oscs[0].onended = null;
+  atual.oscs.forEach(o => { try { o.stop(); } catch (e) {} });
+  atual.g.disconnect(); atual = null;
+}
+
+$("play").onclick = () => { ctx = ctx || new AudioContext(); ctx.resume(); tocar(0); };
+$("stop").onclick = () => { parar(); $("agora").textContent = ""; $("prog").style.width = 0; };
+setInterval(() => {
+  if (atual) $("prog").style.width = Math.min(100, (ctx.currentTime - inicio) / LISTA[idx].seg * 100) + "%";
+}, 500);
+</script>
+"""
+
+
+def playlist():
+    st.subheader("🎶 Playlist")
+    lista = st.session_state.playlist
+    for i, it in enumerate(lista):
+        with st.container(key=f"faixa{i}"):  # classe .st-key-faixaN: mantém o ✕ na mesma linha no celular
+            c1, c2 = st.columns([6, 1], vertical_alignment="center")
+            c1.write(f"{i + 1}. {it['titulo']}")
+            if c2.button("✕", key=f"rm{i}", help="Remover"):
+                lista.pop(i)
+                st.rerun()
+    total = sum(it["seg"] for it in lista) // 60
+    st.caption(f"Total: {total} min · toca em sequência, sem pausa entre as faixas")
+    components.html(PLAYER_HTML.replace("__LISTA__", json.dumps(lista)), height=120)
+    if st.button("Limpar playlist"):
+        lista.clear()
+        st.rerun()
 
 
 if __name__ == "__main__":
