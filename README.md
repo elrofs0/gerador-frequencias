@@ -3,13 +3,17 @@
 Gere tons puros e batidas binaurais para relaxar, meditar e recomeçar — direto no navegador, em alta definição (16-bit · 44.1 kHz).
 
 - Presets: 4.5 Hz, 7.83 Hz (Schumann), 10 Hz, 174 Hz, 285 Hz, 528 Hz — ou qualquer frequência personalizada
-- Modo binaural para frequências abaixo de 40 Hz (use fones)
+- Modo binaural para frequências até 40 Hz, incluindo o gama (use fones)
 - Duração de 1 a 30 minutos, player embutido e download em `.wav`
 - Playlist: monte uma sequência de frequências e deixe tocando sem parar, com repetição
 - Vídeo MP4 com fundo cósmico e geometria sagrada (Flor da Vida, Metatron, Merkabá, Lótus) girando devagar sobre o áudio
 - Sons de fundo com a frequência por trás: gravações reais (chuva, mar, pássaros, riacho, fogueira), sons sintéticos (chuva, ondas, vento) e uma melodia ambiente afinada no tom da frequência
 - Senoide gerada só com a biblioteca padrão do Python (`wave`, `struct`, `math`), sem ruído
 - Funciona no computador, tablet e celular
+
+## Aviso
+
+Este app é para relaxamento e não substitui tratamento médico: os efeitos atribuídos às frequências não têm comprovação científica. Comece com o volume baixo, principalmente com fones. Quem tem epilepsia ou sensibilidade a sons e luzes deve consultar um médico antes de usar. A visualização não pisca (a luz varia devagar, com suavização de ~2 s).
 
 ## Como rodar
 
