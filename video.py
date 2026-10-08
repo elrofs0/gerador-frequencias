@@ -4,6 +4,7 @@ Renderiza só um loop curto (LOOP_S segundos) e o ffmpeg repete esse loop pela d
 áudio sem recodificar (-stream_loop + -c:v copy): rápido mesmo para 30 minutos.
 Sem piscadas: só rotação lenta e um "respirar" de 10 s (seguro para fotossensíveis).
 """
+import unicodedata
 import math
 import os
 import shutil
@@ -103,7 +104,12 @@ def _texto(legenda):
     """Legenda e assinatura numa camada RGB aditiva."""
     img = Image.new("RGB", (W, H))
     d = ImageDraw.Draw(img)
-    fonte, pequena = ImageFont.load_default(size=34), ImageFont.load_default(size=18)
+    try:  # a fonte embutida do Pillow não tem acentos: com a DejaVu (se existir) eles saem certos
+        dejavu = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        fonte, pequena = ImageFont.truetype(dejavu, 32), ImageFont.truetype(dejavu, 17)
+    except OSError:
+        fonte, pequena = ImageFont.load_default(size=34), ImageFont.load_default(size=18)
+        legenda = unicodedata.normalize("NFKD", legenda).encode("ascii", "ignore").decode()
     d.text((W / 2, H - 46), legenda, font=fonte, fill=OURO, anchor="mm")
     d.text((W - 20, H - 18), "feito por Elrofs", font=pequena, fill=(160, 122, 31), anchor="rs")
     return np.asarray(img, np.float32)
@@ -121,11 +127,11 @@ def _lut(fator):
     return [min(255, int(v * fator)) for v in range(256)] * 3
 
 
-def _quadros(nome, legenda):
+def _quadros(nome, legenda=None):
     rng = np.random.default_rng(7)
     nitido, brilho = _camadas(nome)
     fundo, estrelas = _fundo(rng)
-    texto = _texto(legenda)
+    texto = _texto(legenda) if legenda else 0  # sem legenda: ela entra depois (_legendar)
     # cintilar = mistura entre dois céus com fases opostas (operações em C do Pillow: rápido)
     ceu_a, ceu_b = (_ceu(fundo, estrelas, texto, fase) for fase in (0, np.pi))
     giro_loop = 360 / SIMETRIA[nome]
@@ -146,7 +152,7 @@ def _ffmpeg(*args, **kw):
     return subprocess.run([FFMPEG, "-y", "-v", "error", *args], check=True, **kw)
 
 
-def _render_loop(caminho, simbolo, legenda):
+def _render_loop(caminho, simbolo, legenda=None):
     enc = subprocess.Popen([FFMPEG, "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
                             "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264",
                             "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
@@ -158,6 +164,15 @@ def _render_loop(caminho, simbolo, legenda):
         raise RuntimeError("ffmpeg falhou ao gerar o loop de vídeo")
 
 
+def _legendar(sem_texto, legenda, saida, tmp):
+    """Soma a legenda ao loop sem texto (mesma soma aditiva do render), sem refazer os quadros."""
+    png = os.path.join(tmp, "legenda.png")
+    Image.fromarray(_texto(legenda).astype(np.uint8)).save(png)
+    _ffmpeg("-i", sem_texto, "-i", png, "-filter_complex", "[0:v]format=gbrp[a];[1:v]format=gbrp[b];[a][b]blend=all_mode=addition,format=yuv420p",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "24", "-pix_fmt", "yuv420p",
+            "-g", str(FPS * 2), saida)
+
+
 def gerar_video_faixas(faixas) -> bytes:
     """MP4 (H.264 + AAC) com as faixas em sequência; cada trecho dura o mesmo que o seu áudio.
 
@@ -167,16 +182,19 @@ def gerar_video_faixas(faixas) -> bytes:
     """
     with tempfile.TemporaryDirectory() as tmp:
         p = lambda nome: os.path.join(tmp, nome)
-        loops, trechos, audios = {}, [], []
+        base, loops, trechos, audios = {}, {}, [], []
         for i, (fazer_wav, simbolo, legenda) in enumerate(faixas):
             audios.append(p(f"a{i}.wav"))
             with open(audios[-1], "wb") as f:
                 f.write(fazer_wav())
             with wave.open(audios[-1]) as wf:
                 duracao = wf.getnframes() / wf.getframerate()
-            if (simbolo, legenda) not in loops:  # faixas iguais reaproveitam o loop
+            if simbolo not in base:  # o símbolo girando é desenhado uma vez só (a parte cara)
+                base[simbolo] = p(f"base{len(base)}.mp4")
+                _render_loop(base[simbolo], simbolo)
+            if (simbolo, legenda) not in loops:  # faixas iguais reaproveitam o loop; cada legenda custa ~1 s
                 loops[simbolo, legenda] = p(f"loop{len(loops)}.mp4")
-                _render_loop(loops[simbolo, legenda], simbolo, legenda)
+                _legendar(base[simbolo], legenda, loops[simbolo, legenda], tmp)
             trechos.append(f"v{i}.mp4")
             _ffmpeg("-stream_loop", "-1", "-i", loops[simbolo, legenda], "-t", f"{duracao:.3f}",
                     "-c", "copy", p(trechos[-1]))

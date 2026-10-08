@@ -116,17 +116,19 @@ def melodia(raiz: float, rng) -> np.ndarray:
 BLOCO = RATE * 30  # o WAV é gerado e gravado em blocos de 30 s: o pico de memória fica perto do tamanho do arquivo
 
 
-def tom(freqs: list[float], idx: np.ndarray, total: int) -> np.ndarray:
+def tom(freqs: list[float], idx: np.ndarray, total: int, pulso: float | None = None) -> np.ndarray:
     """Os quadros `idx` do tom: float64, uma coluna por canal, pico 1, com fade nas pontas.
     A fase sai direto do índice da amostra (float64 sobra em precisão), então não há emenda
     entre blocos nem salto de fase, mesmo em frequências como 7.83 Hz."""
     x = np.sin(np.outer(idx, 2 * np.pi * np.asarray(freqs, np.float64) / RATE))
+    if pulso:  # isocrônico: a portadora liga e desliga suavemente `pulso` vezes por segundo (0..1)
+        x = x * (0.5 * (1 + np.sin(2 * np.pi * pulso * idx / RATE)))[:, None]
     return x * np.minimum(1, np.minimum(idx, total - 1 - idx) / FADE)[:, None]
 
 
-def gerar_wav(freqs: list[float], segundos: int, ambientes=(), vol_freq=1.0) -> bytes:
+def gerar_wav(freqs: list[float], segundos: int, ambientes=(), vol_freq=1.0, pulso: float | None = None) -> bytes:
     """Uma frequência por canal: [f] = mono, [esq, dir] = estéreo (binaural).
-    Com `ambientes`, mistura as camadas por cima e a frequência fica ao fundo (`vol_freq`).
+    `pulso` (Hz) liga o modo isocrônico (um tom só, pulsando). Com `ambientes`, mistura as camadas por cima e a frequência fica ao fundo (`vol_freq`).
     Gera e grava em blocos de BLOCO quadros: o pico de memória é pouco mais que o próprio WAV."""
     total, ch = RATE * segundos, len(freqs)
     if ambientes:
@@ -143,7 +145,7 @@ def gerar_wav(freqs: list[float], segundos: int, ambientes=(), vol_freq=1.0) -> 
         wf.setframerate(RATE)
         for i0 in range(0, total, BLOCO):
             idx = np.arange(i0, min(total, i0 + BLOCO))
-            x = tom(freqs, idx, total)
+            x = tom(freqs, idx, total, pulso)
             if ambientes:
                 amb = np.tanh(sum(c[idx % len(c)] for c in camadas))  # cada loop no seu tamanho; tanh = limitador suave
                 g = np.minimum(1, np.minimum(idx, total - idx) / rampa)[:, None]
@@ -231,21 +233,33 @@ def controles():
 
     minutos = st.slider("Duração (minutos)", 1, 30, 10)
 
-    # Batida binaural só faz sentido para frequências baixas (até 40 Hz, o gama); acima disso, tom puro.
-    # Ligado por padrão: tons de 20–40 Hz também são fracos nos alto-falantes e rendem mais como batida.
-    binaural = freq <= 40 and st.toggle("Modo binaural (estéreo, use fones)", value=True)
-    if binaural:
+    # Binaural e isocrônico só fazem sentido para frequências baixas (até 40 Hz, o gama); acima disso, tom puro.
+    # Binaural é o padrão: tons de 20–40 Hz também são fracos nos alto-falantes e rendem mais como batida.
+    modo = "Tom puro"
+    if freq <= 40:
+        modo = st.radio("Modo", ["Binaural", "Isocrônico", "Tom puro"], horizontal=True,
+                        help="Binaural: um tom diferente em cada ouvido (use fones). "
+                             "Isocrônico: um tom que pulsa, funciona também no alto-falante.")
+    binaural, isocronico = modo == "Binaural", modo == "Isocrônico"
+    pulso = None
+    if binaural or isocronico:
         portadora = st.number_input("Portadora (Hz)", min_value=20.0, max_value=1000.0,
                                     value=200.0, step=1.0, format="%.2f")
+    if binaural:
         freqs = [portadora, portadora + freq]
         st.caption(f"Esquerdo {portadora:g} Hz · Direito {portadora + freq:g} Hz → "
                    f"o cérebro percebe uma batida de {freq:g} Hz. Comece com o volume baixo.")
         nome = f"binaural_{freq:g}Hz_portadora{portadora:g}_{minutos}min.wav"
+    elif isocronico:
+        freqs, pulso = [portadora], freq
+        st.caption(f"Tom de {portadora:g} Hz que pulsa {freq:g} vezes por segundo. "
+                   "Não precisa de fones. Comece com o volume baixo.")
+        nome = f"isocronico_{freq:g}Hz_portadora{portadora:g}_{minutos}min.wav"
     else:
         freqs = [freq]
         nome = f"tom_{freq:g}Hz_{minutos}min.wav"
         if freq < 20:
-            st.info("Abaixo de 20 Hz o tom puro é praticamente inaudível. Ative o modo binaural.")
+            st.info("Abaixo de 20 Hz o tom puro é praticamente inaudível. Use o modo binaural ou isocrônico.")
 
     escolhidos = st.multiselect("Sons de fundo (opcional)", list(AMBIENTES),
                                 placeholder="Chuva, ondas, vento, melodia...")
@@ -256,20 +270,22 @@ def controles():
         st.caption("A frequência fica ao fundo; a melodia é afinada no mesmo tom dela.")
         nome = nome.replace(".wav", "_" + "-".join(ambientes) + ".wav")
 
+    sufixo = " · binaural" if binaural else " · isocrônico" if isocronico else ""
     col1, col2 = st.columns(2)
     longo = minutos > LIMITE_MIN
     if col1.button("Gerar áudio", type="primary", use_container_width=True, disabled=longo):
         with st.spinner(f"Gerando {minutos} min..."):
-            legenda = f"{freq:g} Hz" + (" · binaural" if binaural else "")
-            st.session_state.audio = (gerar_wav(freqs, minutos * 60, ambientes, vol_freq), nome, legenda)
+            legenda = f"{freq:g} Hz" + sufixo
+            st.session_state.audio = (gerar_wav(freqs, minutos * 60, ambientes, vol_freq, pulso), nome, legenda)
             st.session_state.pop("video", None)
     if col2.button("＋ Adicionar à playlist", use_container_width=True):
         titulo = (f"{freq:g} Hz binaural (portadora {freqs[0]:g} Hz)" if binaural
+                  else f"{freq:g} Hz isocrônico (portadora {freqs[0]:g} Hz)" if isocronico
                   else f"{freq:g} Hz") + "".join(f" + {a}" for a in escolhidos) + f" · {minutos} min"
         st.session_state.setdefault("playlist", []).append(
             {"titulo": titulo, "freqs": freqs, "seg": minutos * 60, "amb": ambientes,
-             "vol": vol_freq, "raiz": raiz_musical(freqs[0]),
-             "legenda": f"{freq:g} Hz" + (" · binaural" if binaural else "")})
+             "vol": vol_freq, "raiz": raiz_musical(freqs[0]), "pulso": pulso,
+             "legenda": f"{freq:g} Hz" + sufixo})
     if longo:
         st.caption(f"No site, o download vai até {LIMITE_MIN} min. "
                    "Na playlist pode usar qualquer duração, ela toca direto no navegador.")
@@ -335,7 +351,7 @@ def video_playlist(lista, total_min):
         longo = total_min > LIMITE_VIDEO_MIN
         if st.button("Gerar vídeo da playlist", use_container_width=True, disabled=longo):
             nomes = list(SIMBOLOS.values())
-            faixas = [(lambda it=it: gerar_wav(it["freqs"], it["seg"], it.get("amb", []), it.get("vol", 1.0)),
+            faixas = [(lambda it=it: gerar_wav(it["freqs"], it["seg"], it.get("amb", []), it.get("vol", 1.0), it.get("pulso")),
                        SIMBOLOS.get(escolha) or nomes[i % len(nomes)],
                        it.get("legenda", it["titulo"].split(" · ")[0]))
                       for i, it in enumerate(lista)]
@@ -371,6 +387,16 @@ if __name__ == "__main__":
         for corte in (BLOCO, 2 * BLOCO):
             i = np.arange(corte - 50, corte + 50)
             assert np.abs(s[i] - np.rint(AMP * np.sin(2 * np.pi * 7.83 * i / RATE))).max() <= 1
+        # isocrônico: mono, a envoltória pulsa na frequência pedida (4 Hz -> 4 ciclos por segundo)
+        raw = gerar_wav([200], 3, pulso=4)
+        with wave.open(io.BytesIO(raw)) as wf:
+            assert wf.getnchannels() == 1
+            s = np.frombuffer(wf.readframes(wf.getnframes()), "<i2").astype(float)
+        env = np.abs(s).reshape(-1, RATE // 100).max(axis=1)  # envoltória em janelas de 10 ms
+        env = env[FADE // (RATE // 100) + 5:-(FADE // (RATE // 100) + 5)]
+        assert env.max() > 0.9 * AMP and env.min() < 0.1 * AMP
+        picos = ((env[1:-1] > env[:-2]) & (env[1:-1] >= env[2:]) & (env[1:-1] > 0.8 * AMP)).sum()
+        assert 10 <= picos <= 13, picos  # ~2,8 s de envoltória x 4 Hz
         # com ambiente: estéreo, duração exata (passa da emenda do loop de 64 s), sem clipping
         raw = gerar_wav([528], 70, list(AMBIENTES.values()), 0.3)
         with wave.open(io.BytesIO(raw)) as wf:
