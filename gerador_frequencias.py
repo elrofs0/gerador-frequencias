@@ -2,17 +2,29 @@
 import io
 import json
 import math
+import os
 import struct
 import wave
 from array import array
 from fractions import Fraction
 
+import numpy as np  # já vem com o Streamlit; usado só nas camadas de ambiente
 import streamlit as st
 import streamlit.components.v1 as components
 
 RATE = 44100
 AMP = 0.8 * 32767  # headroom de ~2 dB, evita clipping
 FADE = int(RATE * 0.05)  # 50 ms de fade in/out para não estalar
+
+# Streamlit Community Cloud roda os apps a partir de /mount/src (≈1 GB de RAM): limita o download.
+NUVEM = os.path.abspath(__file__).startswith("/mount/src/")
+LIMITE_MIN = 10 if NUVEM else 30
+
+AMBIENTES = {"🌧 Chuva": "chuva", "🌊 Ondas do mar": "ondas",
+             "🍃 Vento": "vento", "🎹 Melodia ambiente": "melodia"}
+AMB_SEG = 64  # o ambiente é um loop de 64 s, contínuo nas emendas
+ACORDES = [(1, 5 / 4, 3 / 2), (5 / 6, 1, 5 / 4), (2 / 3, 5 / 6, 1), (3 / 4, 15 / 16, 9 / 8)]  # I vi IV V
+SINOS = (2, 9 / 4, 5 / 2, 3, 10 / 3)  # pentatônica acima da raiz
 
 PRESETS = {
     "4.5 Hz — Theta profundo: meditação, introspecção": 4.5,
@@ -24,8 +36,68 @@ PRESETS = {
 }
 
 
-def gerar_wav(freqs: list[float], segundos: int) -> bytes:
-    """Uma frequência por canal: [f] = mono, [esq, dir] = estéreo (binaural)."""
+def raiz_musical(f: float) -> float:
+    """Dobra/divide a frequência em oitavas até 110–220 Hz: a melodia fica afinada com o tom."""
+    while f < 110:
+        f *= 2
+    while f >= 220:
+        f /= 2
+    return f
+
+
+def ambiente(nomes: list[str], raiz: float) -> np.ndarray:
+    """Loop estéreo de AMB_SEG s (float32, pico 1). Ruídos filtrados por FFT são periódicos,
+    então o loop emenda sem clique."""
+    rng = np.random.default_rng()
+    n = RATE * AMB_SEG
+    t = np.arange(n, dtype=np.float32) / RATE
+    f = np.fft.rfftfreq(n, 1 / RATE)
+
+    def ruido(forma):
+        x = np.fft.irfft(np.fft.rfft(rng.standard_normal((n, 2)), axis=0) * forma[:, None], n, axis=0)
+        return (x / np.abs(x).max()).astype(np.float32)
+
+    def onda(periodo, fase=0.0):  # 0..1, período divide AMB_SEG
+        return (0.5 + 0.5 * np.sin(2 * np.pi * t / periodo + fase))[:, None]
+
+    camadas = {
+        "chuva": lambda: 0.5 * ruido((f / (f + 700)) ** 2 / np.sqrt(f + 1) * np.exp(-f / 10000)),
+        "ondas": lambda: 0.8 * ruido(1 / (f + 40) * (f < 1200))
+                 * np.hstack([onda(8), onda(8, 0.6)]) ** 3,
+        "vento": lambda: 0.7 * (ruido(np.exp(-((f - 350) / 150) ** 2)) * (0.3 + 0.7 * onda(16))
+                                + 0.5 * ruido(np.exp(-((f - 900) / 400) ** 2)) * (1 - onda(16)))
+                 * (0.5 + 0.5 * onda(32, 1.0)),
+        "melodia": lambda: 0.6 * melodia(raiz, rng),
+    }
+    out = sum(camadas[nome]() for nome in nomes)
+    return out / np.abs(out).max()
+
+
+def melodia(raiz: float, rng) -> np.ndarray:
+    n_ac = RATE * 16  # 4 acordes de 16 s = 64 s
+    tl = np.arange(n_ac, dtype=np.float32) / RATE
+    env = np.sin(np.pi * tl / 16) ** 2  # sobe e desce: zero nas emendas
+    pad = np.zeros((RATE * AMB_SEG, 2), np.float32)
+    for k, acorde in enumerate(ACORDES):
+        for r in acorde:
+            for c, det in ((0, 1.0), (1, 1.003)):  # leve desafinação L/R = amplitude estéreo
+                fr = raiz * r * det
+                pad[k * n_ac:(k + 1) * n_ac, c] += env * (np.sin(2 * np.pi * fr * tl)
+                                                          + 0.3 * np.sin(4 * np.pi * fr * tl))
+    pad /= np.abs(pad).max()
+    nb = RATE * 4  # um sino a cada 4 s
+    tb = tl[:nb]
+    env_b = np.exp(-tb * 1.2) * (1 - np.exp(-tb * 200)) * (1 - (tb / 4) ** 8)
+    for j in range(AMB_SEG // 4):
+        nota = np.sin(2 * np.pi * raiz * rng.choice(SINOS) * tb) * env_b
+        pan = rng.uniform(0.2, 0.8)
+        pad[j * nb:(j + 1) * nb] += 0.35 * nota[:, None] * np.array([1 - pan, pan], np.float32)
+    return pad
+
+
+def gerar_wav(freqs: list[float], segundos: int, ambientes=(), vol_freq=1.0) -> bytes:
+    """Uma frequência por canal: [f] = mono, [esq, dir] = estéreo (binaural).
+    Com `ambientes`, mistura as camadas por cima e a frequência fica ao fundo (`vol_freq`)."""
     # Um bloco de `den` segundos contém um número inteiro de ciclos em todos os canais
     # (ex.: 7.83 Hz -> 100 s), então repeti-lo é contínuo: senoide pura sem salto de fase.
     den = math.lcm(*(Fraction(f).limit_denominator(100).denominator for f in freqs))
@@ -46,15 +118,27 @@ def gerar_wav(freqs: list[float], segundos: int) -> bytes:
         amostras[i] = round(amostras[i] * g)
         amostras[-1 - i] = round(amostras[-1 - i] * g)
 
-    if struct.pack("=h", 1) != struct.pack("<h", 1):  # WAV é little-endian
-        amostras.byteswap()
-
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
-        wf.setnchannels(ch)
         wf.setsampwidth(2)
         wf.setframerate(RATE)
-        wf.writeframes(amostras.tobytes())
+        if not ambientes:
+            if struct.pack("=h", 1) != struct.pack("<h", 1):  # WAV é little-endian
+                amostras.byteswap()
+            wf.setnchannels(ch)
+            wf.writeframes(amostras.tobytes())
+        else:
+            wf.setnchannels(2)
+            tom = np.frombuffer(amostras, np.int16).reshape(-1, ch)
+            amb = ambiente(list(ambientes), raiz_musical(freqs[0]))
+            escala = 1 / max(1.0, 0.8 * vol_freq + 0.8)  # pico máximo possível da soma
+            rampa = 3 * RATE  # fade de 3 s no ambiente
+            for i0 in range(0, total, len(amb)):  # bloco a bloco: pouca memória extra
+                tb = tom[i0:i0 + len(amb)].astype(np.float32) / 32767
+                idx = np.arange(i0, i0 + len(tb))
+                g = np.minimum(1, np.minimum(idx, total - idx) / rampa)[:, None]
+                mix = (tb * vol_freq + 0.8 * amb[:len(tb)] * g) * escala
+                wf.writeframes((mix * 32767).astype("<i2").tobytes())
     return buf.getvalue()
 
 
@@ -115,7 +199,7 @@ def main():
     if st.session_state.get("playlist"):
         with st.container(border=True):
             playlist()
-    st.caption("Senoide pura · 16-bit · 44.1 kHz · gerado no seu computador, nada é enviado")
+    st.caption("Senoide pura · 16-bit · 44.1 kHz")
 
 
 def controles():
@@ -143,15 +227,29 @@ def controles():
         if freq < 20:
             st.info("Abaixo de 20 Hz o tom puro é praticamente inaudível. Ative o modo binaural.")
 
+    escolhidos = st.multiselect("Sons de fundo (opcional)", list(AMBIENTES),
+                                placeholder="Chuva, ondas, vento, melodia...")
+    ambientes = [AMBIENTES[a] for a in escolhidos]
+    vol_freq = 1.0
+    if ambientes:
+        vol_freq = st.slider("Volume da frequência", 5, 100, 30, format="%d%%") / 100
+        st.caption("A frequência fica ao fundo; a melodia é afinada no mesmo tom dela.")
+        nome = nome.replace(".wav", "_" + "-".join(ambientes) + ".wav")
+
     col1, col2 = st.columns(2)
-    if col1.button("Gerar áudio", type="primary", use_container_width=True):
+    longo = minutos > LIMITE_MIN
+    if col1.button("Gerar áudio", type="primary", use_container_width=True, disabled=longo):
         with st.spinner(f"Gerando {minutos} min..."):
-            st.session_state.audio = (gerar_wav(freqs, minutos * 60), nome)
+            st.session_state.audio = (gerar_wav(freqs, minutos * 60, ambientes, vol_freq), nome)
     if col2.button("＋ Adicionar à playlist", use_container_width=True):
         titulo = (f"{freq:g} Hz binaural (portadora {freqs[0]:g} Hz)" if binaural
-                  else f"{freq:g} Hz") + f" · {minutos} min"
+                  else f"{freq:g} Hz") + "".join(f" + {a}" for a in escolhidos) + f" · {minutos} min"
         st.session_state.setdefault("playlist", []).append(
-            {"titulo": titulo, "freqs": freqs, "seg": minutos * 60})
+            {"titulo": titulo, "freqs": freqs, "seg": minutos * 60, "amb": ambientes,
+             "vol": vol_freq, "raiz": raiz_musical(freqs[0])})
+    if longo:
+        st.caption(f"No site, o download vai até {LIMITE_MIN} min. "
+                   "Na playlist pode usar qualquer duração, ela toca direto no navegador.")
 
     if "audio" in st.session_state:
         dados, nome = st.session_state.audio
@@ -198,17 +296,73 @@ function tocar(i) {
   g.gain.setValueAtTime(VOL, fim - FADE);
   g.gain.linearRampToValueAtTime(0, fim);
   g.connect(ctx.destination);
+  const amb = it.amb || [], vol = it.vol ?? 1;
+  const escala = 1 / Math.max(1, 0.8 * vol + (amb.length ? 0.8 : 0));
+  const gTom = ganho(0.8 * vol * escala), gAmb = ganho(0.8 * escala);
+  gTom.connect(g); gAmb.connect(g);
   const oscs = it.freqs.map((f, c) => {
     const o = ctx.createOscillator(); o.frequency.value = f;
     if (it.freqs.length === 2) {  // binaural: um tom em cada ouvido
-      const p = ctx.createStereoPanner(); p.pan.value = c ? 1 : -1; o.connect(p); p.connect(g);
-    } else o.connect(g);
+      const p = ctx.createStereoPanner(); p.pan.value = c ? 1 : -1; o.connect(p); p.connect(gTom);
+    } else o.connect(gTom);
     o.start(t); o.stop(fim); return o;
   });
+  amb.forEach(nome => oscs.push(...CAMADAS[nome](it, gAmb, t, fim)));
   oscs[0].onended = () => tocar(idx + 1);
   atual = {g, oscs}; inicio = t;
   $("agora").textContent = `♪ ${i + 1}/${LISTA.length} — ${it.titulo}`;
 }
+
+// Camadas de ambiente (mesma receita do download, em Web Audio). Cada uma devolve
+// as fontes que agendou, para poderem ser paradas.
+const ACORDES = __ACORDES__, SINOS = __SINOS__;
+const ganho = v => { const g = ctx.createGain(); g.gain.value = v; return g; };
+const filtro = (tipo, f, q = 0.7) => {
+  const b = ctx.createBiquadFilter(); b.type = tipo; b.frequency.value = f; b.Q.value = q; return b;
+};
+function ruido(t, fim) {
+  const b = ctx.createBuffer(2, ctx.sampleRate * 8, ctx.sampleRate);
+  for (let c = 0; c < 2; c++) { const d = b.getChannelData(c); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }
+  const s = ctx.createBufferSource(); s.buffer = b; s.loop = true; s.start(t); s.stop(fim); return s;
+}
+function lfo(freq, prof, param, t, fim) {
+  const o = ctx.createOscillator(), g = ganho(prof); o.frequency.value = freq; o.connect(g); g.connect(param);
+  o.start(t); o.stop(fim); return o;
+}
+const CAMADAS = {
+  chuva(it, dest, t, fim) {
+    const s = ruido(t, fim); s.connect(filtro("highpass", 900)).connect(filtro("lowpass", 8000)).connect(ganho(0.35)).connect(dest);
+    return [s];
+  },
+  ondas(it, dest, t, fim) {
+    const s = ruido(t, fim), g = ganho(0.5);
+    s.connect(filtro("lowpass", 450)).connect(g).connect(dest);
+    return [s, lfo(1 / 8, 0.48, g.gain, t, fim)];
+  },
+  vento(it, dest, t, fim) {
+    const s = ruido(t, fim), bp = filtro("bandpass", 500, 1.5), g = ganho(0.6);
+    s.connect(bp).connect(g).connect(dest);
+    return [s, lfo(1 / 16, 300, bp.frequency, t, fim), lfo(1 / 32, 0.35, g.gain, t, fim)];
+  },
+  melodia(it, dest, t, fim) {
+    const fontes = [];
+    for (let k = 0, ti = t; ti < fim; k++, ti += 16) {
+      for (const r of ACORDES[k % 4]) [-0.6, 0.6].forEach((pan, c) => {
+        const o = ctx.createOscillator(), g = ctx.createGain(), p = ctx.createStereoPanner();
+        o.frequency.value = it.raiz * r * (c ? 1.003 : 1); p.pan.value = pan;
+        g.gain.setValueAtTime(0, ti); g.gain.linearRampToValueAtTime(0.06, ti + 8); g.gain.linearRampToValueAtTime(0, ti + 16);
+        o.connect(g).connect(p).connect(dest); o.start(ti); o.stop(Math.min(ti + 16, fim)); fontes.push(o);
+      });
+      for (let j = 0; j < 4 && ti + j * 4 < fim; j++) {
+        const tb = ti + j * 4, o = ctx.createOscillator(), g = ctx.createGain(), p = ctx.createStereoPanner();
+        o.frequency.value = it.raiz * SINOS[Math.floor(Math.random() * SINOS.length)]; p.pan.value = Math.random() * 1.2 - 0.6;
+        g.gain.setValueAtTime(0, tb); g.gain.linearRampToValueAtTime(0.12, tb + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, tb + 3.9);
+        o.connect(g).connect(p).connect(dest); o.start(tb); o.stop(Math.min(tb + 4, fim)); fontes.push(o);
+      }
+    }
+    return fontes;
+  },
+};
 
 function parar() {
   if (!atual) return;
@@ -238,7 +392,9 @@ def playlist():
                 st.rerun()
     total = sum(it["seg"] for it in lista) // 60
     st.caption(f"Total: {total} min · toca em sequência, sem pausa entre as faixas")
-    components.html(PLAYER_HTML.replace("__LISTA__", json.dumps(lista)), height=120)
+    html = (PLAYER_HTML.replace("__LISTA__", json.dumps(lista))
+            .replace("__ACORDES__", json.dumps(ACORDES)).replace("__SINOS__", json.dumps(SINOS)))
+    components.html(html, height=120)
     if st.button("Limpar playlist"):
         lista.clear()
         st.rerun()
@@ -257,6 +413,13 @@ if __name__ == "__main__":
             assert s[0] == 0 and max(s) <= 32767 * 0.8 + 1
         # canais diferentes no binaural: L e R divergem após o fade
         assert s[2 * FADE * 2] != s[2 * FADE * 2 + 1]
+        # com ambiente: estéreo, duração exata (passa da emenda do loop de 64 s), sem clipping
+        raw = gerar_wav([528], 70, list(AMBIENTES.values()), 0.3)
+        with wave.open(io.BytesIO(raw)) as wf:
+            assert (wf.getnchannels(), wf.getnframes()) == (2, RATE * 70)
+            s = np.frombuffer(wf.readframes(wf.getnframes()), "<i2")
+        assert np.abs(s).max() < 32767 and s[:2].tolist() == [0, 0]
+        assert raiz_musical(528) == 132 and raiz_musical(4.5) == 144
         print("ok")
     else:
         main()
