@@ -2,3 +2,4 @@ __pycache__/
 /*.wav
 .claude/
 /*.mp4
+previa_*.png

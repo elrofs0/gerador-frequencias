@@ -2,14 +2,18 @@
 
 Gere tons puros e batidas binaurais para relaxar, meditar e recomeçar — direto no navegador, em alta definição (16-bit · 44.1 kHz).
 
-- Presets: 4.5 Hz, 7.83 Hz (Schumann), 10 Hz, 174 Hz, 285 Hz, 528 Hz — ou qualquer frequência personalizada
-- Modo binaural para frequências abaixo de 40 Hz (use fones)
+- Presets: 2 Hz (delta), 4.5 Hz (theta), 7.83 Hz (Schumann), 10 Hz (alfa), 14 Hz (beta), 40 Hz (gama), 174 Hz, 285 Hz, 528 Hz — ou qualquer frequência personalizada
+- Modo binaural para frequências até 40 Hz, incluindo o gama (use fones)
 - Duração de 1 a 30 minutos, player embutido e download em `.wav`
-- Playlist: monte uma sequência de frequências e deixe tocando sem parar, com repetição
+- Playlist: monte uma sequência de frequências e deixe tocando sem parar, com repetição. O player tem faixa anterior/próxima, pausar, volume, lista clicável e tempo, e as faixas se misturam suavemente (crossfade); dá para adicionar e remover faixas sem interromper o som
 - Vídeo MP4 com fundo cósmico e geometria sagrada (Flor da Vida, Metatron, Merkabá, Lótus) girando devagar sobre o áudio
 - Sons de fundo com a frequência por trás: gravações reais (chuva, mar, pássaros, riacho, fogueira), sons sintéticos (chuva, ondas, vento) e uma melodia ambiente afinada no tom da frequência
-- Senoide gerada só com a biblioteca padrão do Python (`wave`, `struct`, `math`), sem ruído
+- Senoide pura, sem ruído nem salto de fase, gerada com numpy e gravada em blocos de 30 s: pouca memória mesmo em 30 minutos
 - Funciona no computador, tablet e celular
+
+## Aviso
+
+Este app é para relaxamento e não substitui tratamento médico: os efeitos atribuídos às frequências não têm comprovação científica. Comece com o volume baixo, principalmente com fones. Quem tem epilepsia ou sensibilidade a sons e luzes deve consultar um médico antes de usar. A visualização não pisca (a luz varia devagar, com suavização de ~2 s).
 
 ## Como rodar
 
@@ -22,7 +26,7 @@ Autoteste do gerador: `python gerador_frequencias.py --test`
 
 ## Créditos das gravações
 
-Todas do Wikimedia Commons, recortadas em loops:
+Todas do Wikimedia Commons, recortadas em loops (em `static/` há cada uma em `.wav` e em `.flac`, sem perda e ~45% menor: o navegador baixa o FLAC e cai para o WAV se faltar):
 
 - Fogueira: [Campfire sound ambience.ogg](https://commons.wikimedia.org/wiki/File:Campfire_sound_ambience.ogg), por Glaneur de sons, licença [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/) (recortada e convertida em loop mono)
 
