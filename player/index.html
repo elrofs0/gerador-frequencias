@@ -4,24 +4,39 @@
      então adicionar ou remover faixas NÃO recarrega esta página e o som continua tocando. -->
 <style>
   body {margin:0; font-family:'Source Sans Pro',sans-serif; color:#2e1f4a;}
-  .p {display:flex; align-items:center; gap:12px; flex-wrap:wrap;}
-  button {border:none; border-radius:999px; padding:10px 22px; font-size:15px; font-weight:600;
+  .p {display:flex; align-items:center; gap:10px; flex-wrap:wrap;}
+  button {border:none; border-radius:999px; padding:10px 20px; font-size:15px; font-weight:600;
           cursor:pointer; color:#fff; background:linear-gradient(90deg,#7b4fd6,#a35bd9);}
   button.sec {background:#f1e9fc; color:#7b4fd6;}
+  button.ic {padding:10px 14px; min-width:44px;}
+  button:disabled {opacity:.45; cursor:default;}
+  button:focus-visible, select:focus-visible, input:focus-visible {outline:2px solid #7b4fd6; outline-offset:2px;}
   label {font-size:14px; display:flex; align-items:center; gap:6px;}
   .agora {margin:12px 0 6px; font-size:15px; min-height:20px;}
-  .barra {height:6px; border-radius:6px; background:#ece2fa; overflow:hidden;}
+  .linha {display:flex; align-items:center; gap:10px;}
+  .barra {flex:1; height:6px; border-radius:6px; background:#ece2fa; overflow:hidden;}
   .barra div {height:100%; width:0; background:linear-gradient(90deg,#7b4fd6,#d19a2a);}
+  .tempo {font-size:13px; color:#6b5a8a; font-variant-numeric:tabular-nums; min-width:92px; text-align:right;}
+  #vol {width:90px; accent-color:#7b4fd6;}
+  #lista {list-style:none; margin:12px 0 0; padding:0; max-height:150px; overflow-y:auto;
+          border:1px solid #e4d6f7; border-radius:12px; background:rgba(255,255,255,.7);}
+  #lista li {padding:8px 12px; font-size:14px; cursor:pointer; border-bottom:1px solid #f1e9fc;}
+  #lista li:last-child {border-bottom:none;}
+  #lista li:hover {background:#f6effd;}
+  #lista li.on {background:#ece2fa; font-weight:600; color:#5a31b4;}
   #tela {width:100%; aspect-ratio:16/9; display:block; border-radius:14px; background:#0b0620; margin-bottom:12px;}
   #tela:fullscreen {border-radius:0;}
   select {border:1px solid #e4d6f7; border-radius:999px; padding:8px 12px; background:#fff; color:#2e1f4a; font-size:14px;}
 </style>
 <canvas id="tela" width="1280" height="720"></canvas>
 <div class="p">
+  <button id="ant" class="sec ic" title="Faixa anterior (se passou de 3 s, volta ao começo da atual)" aria-label="Faixa anterior">⏮</button>
   <button id="play">▶ Tocar playlist</button>
+  <button id="prox" class="sec ic" title="Próxima faixa" aria-label="Próxima faixa">⏭</button>
   <button id="stop" class="sec">■ Parar</button>
+  <label title="Volume">🔊 <input type="range" id="vol" min="0" max="100" value="100" aria-label="Volume"></label>
   <button id="cheia" class="sec">⛶ Tela cheia</button>
-  <select id="visual">
+  <select id="visual" aria-label="Símbolo">
     <option value="alternar">🔄 Alternar símbolos</option>
     <option value="flor">🌸 Flor da Vida</option>
     <option value="metatron">✡ Metatron</option>
@@ -31,25 +46,44 @@
   <label><input type="checkbox" id="loop" checked> Repetir</label>
 </div>
 <div class="agora" id="agora"></div>
-<div class="barra"><div id="prog"></div></div>
+<div class="linha"><div class="barra"><div id="prog"></div></div><span class="tempo" id="tempo"></span></div>
+<ol id="lista" aria-label="Faixas da playlist"></ol>
 <script>
 const VOL = 0.5, FADE = 1.5;
 let LISTA = [], ACORDES = [], SINOS = [], GRAVACOES = {}, BUF = {};  // preenchidos pelo Streamlit
-let ctx, atual = null, idx = 0, inicio = 0;
+let ctx, saida, analisador, mestre, atual = null, idx = 0, inicio = 0, pausado = false;
 const $ = id => document.getElementById(id);
 
-function tocar(i) {
-  parar();
-  if (i >= LISTA.length) { if (!$("loop").checked) { $("agora").textContent = ""; return; } i = 0; }
+// Entrada e saída de cada faixa em potência constante (seno/cosseno em passos lineares): quando a
+// próxima começa durante a saída da anterior, o volume somado fica parelho, sem buraco no meio.
+const PASSOS = 16;
+function rampaEntra(p, t, dur) {
+  p.setValueAtTime(0, t);
+  for (let k = 1; k <= PASSOS; k++) p.linearRampToValueAtTime(VOL * Math.sin(Math.PI / 2 * k / PASSOS), t + dur * k / PASSOS);
+}
+function rampaSai(p, t, dur) {
+  p.setValueAtTime(VOL, t);
+  for (let k = 1; k <= PASSOS; k++) p.linearRampToValueAtTime(VOL * Math.cos(Math.PI / 2 * k / PASSOS), t + dur * k / PASSOS);
+}
+
+let saindo = [];  // faixas que ainda estão no fade de saída enquanto a próxima já entrou
+
+// `cruzando`: a faixa anterior não é cortada, só termina o fade de saída por baixo da nova.
+function tocar(i, cruzando = false) {
+  if (!cruzando) parar();
+  if (i >= LISTA.length) {
+    if (!$("loop").checked) return;  // sem repetir: a última faixa termina sozinha (ver `acabou`)
+    i = 0;
+  }
   if (i < 0) i = 0;
   if (!LISTA.length) return;
-  idx = i; const it = LISTA[i], t = ctx.currentTime, fim = t + it.seg;
+  if (cruzando && atual) saindo.push(atual);
+  idx = i; const it = LISTA[i], t = ctx.currentTime, fim = t + it.seg, xf = Math.min(FADE, it.seg / 4);
   const g = ctx.createGain();
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(VOL, t + FADE);
-  g.gain.setValueAtTime(VOL, fim - FADE);
-  g.gain.linearRampToValueAtTime(0, fim);
-  g.connect(saida);
+  rampaEntra(g.gain, t, xf);
+  rampaSai(g.gain, fim - xf, xf);
+  const corte = ctx.createGain();  // só para calar a faixa com suavidade ao trocar/parar à mão
+  g.connect(corte).connect(saida);
   // gravação que ainda não terminou de baixar (faixa adicionada com a playlist tocando) fica de fora
   const amb = (it.amb || []).filter(n => !GRAVACOES[n] || BUF[n]), vol = it.vol ?? 1;
   const escala = 1 / Math.max(1, 0.8 * vol + (amb.length ? 0.8 : 0));
@@ -62,11 +96,48 @@ function tocar(i) {
     } else o.connect(gTom);
     o.start(t); o.stop(fim); return o;
   });
-  amb.forEach(nome => oscs.push(...CAMADAS[nome](it, gAmb, t, fim)));
-  oscs[0].onended = () => tocar(idx + 1);
-  atual = {g, oscs, it}; inicio = t;
+  amb.forEach(nome => oscs.push(...(CAMADAS[nome](it, gAmb, t, fim, oscs) || [])));
+  // Gatilho no relógio de áudio (onended não é freado em aba em segundo plano, como os timers):
+  // dispara a próxima faixa quando começa o fade de saída desta.
+  const gat = ctx.createOscillator();
+  gat.connect(ganho(0)).connect(saida); gat.start(t); gat.stop(fim - xf);
+  gat.onended = () => tocar(idx + 1, true);
+  oscs.push(gat);
+  const faixa = {g, corte, oscs, it};
+  oscs[0].onended = () => acabou(faixa);
+  atual = faixa; inicio = t;
   $("agora").textContent = `♪ ${i + 1}/${LISTA.length} — ${it.titulo}`;
+  marcar();
   VIS.faixa(i, it.legenda || it.titulo.split(" · ")[0]);
+}
+
+// A faixa chegou ao fim sozinha. Se foi a última e não há repetição, limpa o painel; se já
+// passou o bastão (cruzamento), só sai da lista das que estavam saindo.
+function acabou(f) {
+  saindo = saindo.filter(s => s !== f);
+  if (atual === f) { atual = null; $("agora").textContent = ""; $("prog").style.width = 0; $("tempo").textContent = ""; marcar(); VIS.faixa(-1, ""); atualizarPlay(); }
+}
+
+// ---------- Lista de faixas, tempo e botões ----------
+const fmt = s => { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+
+function desenharLista() {
+  const ol = $("lista");
+  ol.replaceChildren(...LISTA.map((it, i) => {
+    const li = document.createElement("li");
+    li.textContent = `${i + 1}. ${it.titulo}`; li.title = "Tocar esta faixa";
+    li.onclick = () => iniciar(i);
+    return li;
+  }));
+  ol.style.display = LISTA.length ? "" : "none";
+  marcar();
+}
+function marcar() {
+  [...$("lista").children].forEach((li, i) => li.classList.toggle("on", !!atual && i === idx));
+  $("ant").disabled = $("prox").disabled = !LISTA.length;
+}
+function atualizarPlay() {
+  $("play").textContent = !atual ? "▶ Tocar playlist" : pausado ? "▶ Continuar" : "⏸ Pausar";
 }
 
 // Camadas de ambiente (mesma receita do download, em Web Audio). Cada uma devolve
@@ -99,23 +170,31 @@ const CAMADAS = {
     s.connect(bp).connect(g).connect(dest);
     return [s, lfo(1 / 16, 300, bp.frequency, t, fim), lfo(1 / 32, 0.35, g.gain, t, fim)];
   },
-  melodia(it, dest, t, fim) {
-    const fontes = [];
-    for (let k = 0, ti = t; ti < fim; k++, ti += 16) {
+  // Agendada trecho a trecho (um acorde + 4 sinos = 16 s): o relógio de áudio dispara o trecho
+  // seguinte no meio do atual. Faixas de horas não criam milhares de osciladores de uma vez.
+  // As fontes entram em `lista` (as mesmas de `oscs`) para parar() alcançar todas.
+  melodia(it, dest, t, fim, lista) {
+    const trecho = k => {
+      const ti = t + 16 * k;
+      if (ti >= fim) return;
       for (const r of ACORDES[k % 4]) [-0.6, 0.6].forEach((pan, c) => {
         const o = ctx.createOscillator(), g = ctx.createGain(), p = ctx.createStereoPanner();
         o.frequency.value = it.raiz * r * (c ? 1.003 : 1); p.pan.value = pan;
         g.gain.setValueAtTime(0, ti); g.gain.linearRampToValueAtTime(0.06, ti + 8); g.gain.linearRampToValueAtTime(0, ti + 16);
-        o.connect(g).connect(p).connect(dest); o.start(ti); o.stop(Math.min(ti + 16, fim)); fontes.push(o);
+        o.connect(g).connect(p).connect(dest); o.start(ti); o.stop(Math.min(ti + 16, fim)); lista.push(o);
       });
       for (let j = 0; j < 4 && ti + j * 4 < fim; j++) {
         const tb = ti + j * 4, o = ctx.createOscillator(), g = ctx.createGain(), p = ctx.createStereoPanner();
         o.frequency.value = it.raiz * SINOS[Math.floor(Math.random() * SINOS.length)]; p.pan.value = Math.random() * 1.2 - 0.6;
         g.gain.setValueAtTime(0, tb); g.gain.linearRampToValueAtTime(0.12, tb + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, tb + 3.9);
-        o.connect(g).connect(p).connect(dest); o.start(tb); o.stop(Math.min(tb + 4, fim)); fontes.push(o);
+        o.connect(g).connect(p).connect(dest); o.start(tb); o.stop(Math.min(tb + 4, fim)); lista.push(o);
       }
-    }
-    return fontes;
+      const rel = ctx.createOscillator();  // relógio: termina no meio do trecho e agenda o próximo
+      rel.connect(ganho(0)).connect(dest); rel.start(ti); rel.stop(ti + 8);
+      rel.onended = () => trecho(k + 1);
+      lista.push(rel);
+    };
+    trecho(0);
   },
 };
 
@@ -128,10 +207,22 @@ function urlDoApp() {
   catch (e) { return new URLSearchParams(location.search).get("streamlitUrl") || location.href; }
 }
 const baixando = {};
+// FLAC é sem perda (decodifica idêntico ao WAV, então o loop segue sem emenda) e ~45% menor:
+// pesa menos no celular. Se o .flac não existir ou não decodificar, cai para o .wav.
+async function baixarSom(arquivo) {
+  let erro;
+  for (const ext of ["flac", "wav"]) {
+    try {
+      const r = await fetch(new URL(`app/static/${arquivo}.${ext}`, urlDoApp()));
+      if (r.ok) return await ctx.decodeAudioData(await r.arrayBuffer());
+      erro = new Error(`${arquivo}.${ext}: HTTP ${r.status}`);
+    } catch (e) { erro = e; }
+  }
+  throw erro;
+}
 async function carregar(nomes) {
   await Promise.all(nomes.filter(n => GRAVACOES[n] && !BUF[n]).map(n => baixando[n] ||= (async () => {
-    const r = await fetch(new URL(`app/static/${GRAVACOES[n]}.wav`, urlDoApp()));
-    BUF[n] = await ctx.decodeAudioData(await r.arrayBuffer());
+    BUF[n] = await baixarSom(GRAVACOES[n]);
   })().catch(e => { delete baixando[n]; throw e; })));  // falhou: deixa tentar de novo depois
 }
 function registrarGravacoes() {
@@ -143,29 +234,67 @@ function registrarGravacoes() {
   });
 }
 
+// Cala a faixa atual e as que ainda estavam saindo, com um fade curto (sem estalo). O onended de
+// cada fonte é desligado antes, para parar à mão não disparar "próxima faixa".
 function parar() {
-  if (!atual) return;
-  atual.oscs[0].onended = null;
-  atual.oscs.forEach(o => { try { o.stop(); } catch (e) {} });
-  atual.g.disconnect(); atual = null;
+  const agora = ctx ? ctx.currentTime : 0;
+  for (const f of [atual, ...saindo]) {
+    if (!f) continue;
+    f.oscs.forEach(o => { o.onended = null; try { o.stop(agora + 0.3); } catch (e) {} });
+    f.corte.gain.setTargetAtTime(0, agora, 0.06);
+    setTimeout(() => f.g.disconnect(), 800);
+  }
+  atual = null; saindo = [];
 }
 
-let saida, analisador;
-$("play").onclick = async () => {
+// Volume geral (curva quadrática: o ouvido pede um controle mais fino nos volumes baixos).
+// Fica depois do analisador, então a animação não muda quando o volume muda.
+function aplicarVolume() {
+  if (mestre) mestre.gain.setTargetAtTime(($("vol").value / 100) ** 2, ctx.currentTime, 0.02);
+}
+$("vol").oninput = aplicarVolume;
+
+async function iniciar(i) {  // toca a faixa i (cria o áudio e baixa as gravações, se preciso)
+  if (!LISTA.length) return;
   if (!ctx) {
     ctx = new AudioContext();
     analisador = ctx.createAnalyser(); analisador.fftSize = 2048;
-    saida = ctx.createGain(); saida.connect(analisador); analisador.connect(ctx.destination);
+    saida = ctx.createGain(); mestre = ctx.createGain();
+    saida.connect(analisador); analisador.connect(mestre); mestre.connect(ctx.destination);
+    mestre.gain.value = ($("vol").value / 100) ** 2;
   }
-  ctx.resume();
+  pausado = false;
+  await ctx.resume();
   $("agora").textContent = "Carregando sons...";
   try { await carregar(LISTA.flatMap(it => it.amb || [])); }
   catch (e) { $("agora").textContent = "Não foi possível carregar as gravações."; return; }
-  tocar(0);
+  tocar(i);
+  atualizarPlay();
+}
+
+$("play").onclick = async () => {  // parado: começa; tocando: pausa; pausado: continua
+  if (!atual) return iniciar(0);
+  pausado = !pausado;
+  await (pausado ? ctx.suspend() : ctx.resume());
+  atualizarPlay();
 };
-$("stop").onclick = () => { parar(); $("agora").textContent = ""; $("prog").style.width = 0; VIS.faixa(-1, ""); };
+$("prox").onclick = () => iniciar(atual && idx + 1 < LISTA.length ? idx + 1 : 0);
+$("ant").onclick = () => {  // passou de 3 s: volta ao começo da atual; senão, vai para a anterior
+  if (atual && ctx.currentTime - inicio > 3) return iniciar(idx);
+  iniciar(atual && idx > 0 ? idx - 1 : LISTA.length - 1);
+};
+$("stop").onclick = async () => {
+  if (!ctx) return;
+  if (pausado) { pausado = false; await ctx.resume(); }  // relógio parado não executaria o fade
+  parar();
+  $("agora").textContent = ""; $("prog").style.width = 0; $("tempo").textContent = "";
+  marcar(); VIS.faixa(-1, ""); atualizarPlay();
+};
 setInterval(() => {
-  if (atual) $("prog").style.width = Math.min(100, (ctx.currentTime - inicio) / atual.it.seg * 100) + "%";
+  if (!atual) return;
+  const dec = ctx.currentTime - inicio;
+  $("prog").style.width = Math.min(100, dec / atual.it.seg * 100) + "%";
+  $("tempo").textContent = `${fmt(dec)} / ${fmt(atual.it.seg)}`;
 }, 500);
 
 // ---------- Ligação com o Streamlit ----------
@@ -192,12 +321,20 @@ function receber(args) {
       $("agora").textContent = `♪ ${atual.it.titulo} (já removida da lista)`;
     }
   }
+  desenharLista();
   if (ctx) carregar(LISTA.flatMap(it => it.amb || [])).catch(() => {});
-  avisar("setFrameHeight", {height: 490});
+  ajustarAltura();
 }
+// A altura do iframe acompanha o conteúdo (a lista de faixas cresce e encolhe).
+let alturaEnviada = 0;
+function ajustarAltura() {
+  const h = Math.ceil(document.body.getBoundingClientRect().height);
+  if (h > 0 && h !== alturaEnviada) { alturaEnviada = h; avisar("setFrameHeight", {height: h}); }
+}
+new ResizeObserver(ajustarAltura).observe(document.body);
 window.addEventListener("message", ev => { if (ev.data && ev.data.type === "streamlit:render") receber(ev.data.args); });
 avisar("componentReady", {apiVersion: 1});
-avisar("setFrameHeight", {height: 490});
+ajustarAltura();
 
 // ---------- Visualização ao vivo (estilo Windows Media Player) ----------
 // Céu cósmico + geometria sagrada dourada girando devagar. Reage ao volume do som, mas com

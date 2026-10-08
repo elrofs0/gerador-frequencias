@@ -84,7 +84,7 @@ def ambiente(nomes: list[str], raiz: float) -> np.ndarray:
     return out / np.abs(out).max()
 
 
-@st.cache_data
+@st.cache_resource  # o array é só lido: cache_data copiaria ~20 MB a cada chamada
 def gravacao(nome: str) -> np.ndarray:
     with wave.open(os.path.join(PASTA_SONS, GRAVACOES[nome] + ".wav")) as wf:
         x = np.frombuffer(wf.readframes(wf.getnframes()), "<i2").astype(np.float32) / 32767
