@@ -20,8 +20,13 @@ FADE = int(RATE * 0.05)  # 50 ms de fade in/out para não estalar
 NUVEM = os.path.abspath(__file__).startswith("/mount/src/")
 LIMITE_MIN = 10 if NUVEM else 30
 
-AMBIENTES = {"🌧 Chuva": "chuva", "🌊 Ondas do mar": "ondas",
-             "🍃 Vento": "vento", "🎹 Melodia ambiente": "melodia"}
+AMBIENTES = {"🌧 Chuva (gravação real)": "chuva-real", "🌊 Mar (gravação real)": "mar-real",
+             "🐦 Pássaros (gravação real)": "passaros", "💧 Riacho (gravação real)": "riacho",
+             "🌧 Chuva (sintética)": "chuva", "🌊 Ondas (sintéticas)": "ondas",
+             "🍃 Vento (sintético)": "vento", "🎹 Melodia ambiente": "melodia"}
+# Gravações CC0/domínio público do Wikimedia Commons (créditos no README), em loops sem emenda.
+PASTA_SONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+GRAVACOES = {"chuva-real": "chuva", "mar-real": "mar", "passaros": "passaros", "riacho": "riacho"}
 AMB_SEG = 64  # o ambiente é um loop de 64 s, contínuo nas emendas
 ACORDES = [(1, 5 / 4, 3 / 2), (5 / 6, 1, 5 / 4), (2 / 3, 5 / 6, 1), (3 / 4, 15 / 16, 9 / 8)]  # I vi IV V
 SINOS = (2, 9 / 4, 5 / 2, 3, 10 / 3)  # pentatônica acima da raiz
@@ -71,6 +76,13 @@ def ambiente(nomes: list[str], raiz: float) -> np.ndarray:
     }
     out = sum(camadas[nome]() for nome in nomes)
     return out / np.abs(out).max()
+
+
+@st.cache_data
+def gravacao(nome: str) -> np.ndarray:
+    with wave.open(os.path.join(PASTA_SONS, GRAVACOES[nome] + ".wav")) as wf:
+        x = np.frombuffer(wf.readframes(wf.getnframes()), "<i2").astype(np.float32) / 32767
+    return 1.5 * np.stack([x, np.roll(x, len(x) // 2)], axis=1)  # direito defasado = estéreo amplo
 
 
 def melodia(raiz: float, rng) -> np.ndarray:
@@ -130,14 +142,18 @@ def gerar_wav(freqs: list[float], segundos: int, ambientes=(), vol_freq=1.0) -> 
         else:
             wf.setnchannels(2)
             tom = np.frombuffer(amostras, np.int16).reshape(-1, ch)
-            amb = ambiente(list(ambientes), raiz_musical(freqs[0]))
+            sinteticos = [a for a in ambientes if a not in GRAVACOES]
+            camadas = [ambiente(sinteticos, raiz_musical(freqs[0]))] if sinteticos else []
+            camadas += [gravacao(a) for a in ambientes if a in GRAVACOES]
             escala = 1 / max(1.0, 0.8 * vol_freq + 0.8)  # pico máximo possível da soma
             rampa = 3 * RATE  # fade de 3 s no ambiente
-            for i0 in range(0, total, len(amb)):  # bloco a bloco: pouca memória extra
-                tb = tom[i0:i0 + len(amb)].astype(np.float32) / 32767
-                idx = np.arange(i0, i0 + len(tb))
+            bloco = RATE * AMB_SEG
+            for i0 in range(0, total, bloco):  # bloco a bloco: pouca memória extra
+                idx = np.arange(i0, min(total, i0 + bloco))
+                tb = tom[idx].astype(np.float32) / 32767
+                amb = np.tanh(sum(c[idx % len(c)] for c in camadas))  # cada loop no seu tamanho; tanh = limitador suave
                 g = np.minimum(1, np.minimum(idx, total - idx) / rampa)[:, None]
-                mix = (tb * vol_freq + 0.8 * amb[:len(tb)] * g) * escala
+                mix = (tb * vol_freq + 0.8 * amb * g) * escala
                 wf.writeframes((mix * 32767).astype("<i2").tobytes())
     return buf.getvalue()
 
@@ -299,7 +315,7 @@ function tocar(i) {
   const amb = it.amb || [], vol = it.vol ?? 1;
   const escala = 1 / Math.max(1, 0.8 * vol + (amb.length ? 0.8 : 0));
   const gTom = ganho(0.8 * vol * escala), gAmb = ganho(0.8 * escala);
-  gTom.connect(g); gAmb.connect(g);
+  gTom.connect(g); gAmb.connect(ctx.createDynamicsCompressor()).connect(g);  // limitador do ambiente
   const oscs = it.freqs.map((f, c) => {
     const o = ctx.createOscillator(); o.frequency.value = f;
     if (it.freqs.length === 2) {  // binaural: um tom em cada ouvido
@@ -364,6 +380,22 @@ const CAMADAS = {
   },
 };
 
+// Gravações reais: baixadas uma vez de app/static e tocadas em loop; o canal direito
+// começa no meio do loop (mesmo truque de estéreo do download).
+const GRAVACOES = __GRAVACOES__, BUF = {};
+async function carregar(nomes) {
+  await Promise.all(nomes.filter(n => GRAVACOES[n] && !BUF[n]).map(async n => {
+    const r = await fetch(new URL(`app/static/${GRAVACOES[n]}.wav`, document.baseURI));
+    BUF[n] = await ctx.decodeAudioData(await r.arrayBuffer());
+  }));
+}
+for (const n in GRAVACOES) CAMADAS[n] = (it, dest, t, fim) => [-1, 1].map((pan, c) => {
+  const s = ctx.createBufferSource(), p = ctx.createStereoPanner();
+  s.buffer = BUF[n]; s.loop = true; p.pan.value = pan;
+  s.connect(p).connect(ganho(1.5)).connect(dest);
+  s.start(t, c * BUF[n].duration / 2); s.stop(fim); return s;
+});
+
 function parar() {
   if (!atual) return;
   atual.oscs[0].onended = null;
@@ -371,7 +403,13 @@ function parar() {
   atual.g.disconnect(); atual = null;
 }
 
-$("play").onclick = () => { ctx = ctx || new AudioContext(); ctx.resume(); tocar(0); };
+$("play").onclick = async () => {
+  ctx = ctx || new AudioContext(); ctx.resume();
+  $("agora").textContent = "Carregando sons...";
+  try { await carregar(LISTA.flatMap(it => it.amb || [])); }
+  catch (e) { $("agora").textContent = "Não foi possível carregar as gravações."; return; }
+  tocar(0);
+};
 $("stop").onclick = () => { parar(); $("agora").textContent = ""; $("prog").style.width = 0; };
 setInterval(() => {
   if (atual) $("prog").style.width = Math.min(100, (ctx.currentTime - inicio) / LISTA[idx].seg * 100) + "%";
@@ -393,7 +431,8 @@ def playlist():
     total = sum(it["seg"] for it in lista) // 60
     st.caption(f"Total: {total} min · toca em sequência, sem pausa entre as faixas")
     html = (PLAYER_HTML.replace("__LISTA__", json.dumps(lista))
-            .replace("__ACORDES__", json.dumps(ACORDES)).replace("__SINOS__", json.dumps(SINOS)))
+            .replace("__ACORDES__", json.dumps(ACORDES)).replace("__SINOS__", json.dumps(SINOS))
+            .replace("__GRAVACOES__", json.dumps(GRAVACOES)))
     components.html(html, height=120)
     if st.button("Limpar playlist"):
         lista.clear()

@@ -6,5 +6,8 @@ secondaryBackgroundColor = "#f1e9fc"
 textColor = "#2e1f4a"
 font = "sans serif"
 
+[server]
+enableStaticServing = true  # serve static/*.wav para o player da playlist
+
 [browser]
 gatherUsageStats = false
