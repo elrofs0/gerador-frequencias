@@ -12,6 +12,8 @@ import numpy as np  # já vem com o Streamlit; usado só nas camadas de ambiente
 import streamlit as st
 import streamlit.components.v1 as components
 
+from video import FFMPEG, SIMBOLOS, gerar_video
+
 RATE = 44100
 AMP = 0.8 * 32767  # headroom de ~2 dB, evita clipping
 FADE = int(RATE * 0.05)  # 50 ms de fade in/out para não estalar
@@ -256,7 +258,9 @@ def controles():
     longo = minutos > LIMITE_MIN
     if col1.button("Gerar áudio", type="primary", use_container_width=True, disabled=longo):
         with st.spinner(f"Gerando {minutos} min..."):
-            st.session_state.audio = (gerar_wav(freqs, minutos * 60, ambientes, vol_freq), nome)
+            legenda = f"{freq:g} Hz" + (" · binaural" if binaural else "")
+            st.session_state.audio = (gerar_wav(freqs, minutos * 60, ambientes, vol_freq), nome, legenda)
+            st.session_state.pop("video", None)
     if col2.button("＋ Adicionar à playlist", use_container_width=True):
         titulo = (f"{freq:g} Hz binaural (portadora {freqs[0]:g} Hz)" if binaural
                   else f"{freq:g} Hz") + "".join(f" + {a}" for a in escolhidos) + f" · {minutos} min"
@@ -268,11 +272,26 @@ def controles():
                    "Na playlist pode usar qualquer duração, ela toca direto no navegador.")
 
     if "audio" in st.session_state:
-        dados, nome = st.session_state.audio
+        dados, nome, legenda = st.session_state.audio
         st.audio(dados, format="audio/wav")
         st.download_button("⬇ Baixar " + nome, dados, file_name=nome,
                            mime="audio/wav", use_container_width=True)
         st.caption(f"{len(dados) / 1e6:.1f} MB")
+
+        if FFMPEG:
+            with st.expander("🎬 Criar vídeo com este áudio"):
+                simbolo = st.selectbox("Símbolo", list(SIMBOLOS))
+                st.caption("Fundo cósmico com o símbolo girando devagar. Sem piscadas.")
+                if st.button("Gerar vídeo", use_container_width=True):
+                    with st.spinner("Criando o vídeo... (leva alguns segundos)"):
+                        mp4 = gerar_video(dados, SIMBOLOS[simbolo], legenda)
+                        st.session_state.video = (mp4, nome.replace(".wav", f"_{SIMBOLOS[simbolo]}.mp4"))
+        if "video" in st.session_state:
+            mp4, nome_mp4 = st.session_state.video
+            st.video(mp4)
+            st.download_button("⬇ Baixar vídeo " + nome_mp4, mp4, file_name=nome_mp4,
+                               mime="video/mp4", use_container_width=True)
+            st.caption(f"{len(mp4) / 1e6:.1f} MB")
 
 
 # Player da playlist: gera as senoides ao vivo no navegador (Web Audio), sem arquivos.
@@ -459,6 +478,14 @@ if __name__ == "__main__":
             s = np.frombuffer(wf.readframes(wf.getnframes()), "<i2")
         assert np.abs(s).max() < 32767 and s[:2].tolist() == [0, 0]
         assert raiz_musical(528) == 132 and raiz_musical(4.5) == 144
+        if FFMPEG:  # vídeo: duração do áudio, com vídeo e áudio
+            import subprocess, tempfile
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                f.write(gerar_video(gerar_wav([528], 40), "flor", "528 Hz"))
+            info = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type:format=duration",
+                                   "-of", "csv=p=0", f.name], capture_output=True, text=True).stdout.split()
+            os.remove(f.name)
+            assert "video" in info and "audio" in info and abs(float(info[-1]) - 40) < 1, info
         print("ok")
     else:
         main()
