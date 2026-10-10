@@ -114,7 +114,7 @@ function tocar(i, cruzando = false) {
   atual = faixa; inicio = t;
   $("agora").textContent = `♪ ${i + 1}/${LISTA.length} — ${it.titulo}`;
   marcar();
-  VIS.faixa(i, it.legenda || it.titulo.split(" · ")[0]);
+  VIS.faixa(i, it.legenda || it.titulo.split(" · ")[0], it.tema || "");
 }
 
 // A faixa chegou ao fim sozinha. Se foi a última e não há repetição, limpa o painel; se já
@@ -352,11 +352,13 @@ const VIS = (() => {
                                                     0.3 + Math.random() * 0.7, Math.random() * 6.28]);
   const cache = {};
 
-  function simbolo(nome) {  // desenhado uma vez num canvas fora da tela, com brilho
-    if (cache[nome]) return cache[nome];
+  function simbolo(nome, violeta) {  // desenhado uma vez num canvas fora da tela, com brilho
+    const chave = nome + (violeta ? "-v" : "");
+    if (cache[chave]) return cache[chave];
     const cv = document.createElement("canvas"); cv.width = cv.height = S;
     const d = cv.getContext("2d"), R = S * 0.40, m = S / 2;
-    d.translate(m, m); d.strokeStyle = OURO; d.lineWidth = 2.2; d.shadowColor = "#ffcf6b"; d.shadowBlur = 14;
+    d.translate(m, m); d.lineWidth = 2.2; d.shadowBlur = 14;
+    d.strokeStyle = violeta ? "#dcbcff" : OURO; d.shadowColor = violeta ? "#a259ff" : "#ffcf6b";
     const circ = (x, y, r) => { d.beginPath(); d.arc(x, y, r, 0, 6.2832); d.stroke(); };
     const linha = (p, q) => { d.beginPath(); d.moveTo(p[0], p[1]); d.lineTo(q[0], q[1]); d.stroke(); };
     if (nome === "flor") {
@@ -385,22 +387,39 @@ const VIS = (() => {
         for (let i = 0; i < n; i++) { const a = 2 * Math.PI * i / n; circ(R * dist * Math.cos(a), R * dist * Math.sin(a), R * raio); }
       circ(0, 0, R); circ(0, 0, R * 0.08);
     }
-    return cache[nome] = cv;
+    return cache[chave] = cv;
+  }
+
+  // Chama Violeta: partículas suaves subindo em volta do símbolo (cada uma surge e some devagar)
+  function fagulha(cor) {
+    const cv = document.createElement("canvas"); cv.width = cv.height = 64;
+    const d = cv.getContext("2d"), g = d.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, cor); g.addColorStop(1, "rgba(0,0,0,0)");
+    d.fillStyle = g; d.fillRect(0, 0, 64, 64); return cv;
+  }
+  const FAGULHAS = [fagulha("rgba(176,108,255,1)"), fagulha("rgba(230,190,255,1)"), fagulha("rgba(140,70,240,1)")];
+  const chamas = [];
+  function nova() {
+    const a = Math.random() * 2 * Math.PI, r = H * (0.30 + Math.random() * 0.14);
+    return {x: W / 2 + r * Math.cos(a), y: H / 2 + r * Math.sin(a) + H * 0.05, vy: 25 + Math.random() * 45,
+            fase: Math.random() * 6.28, vida: 0, max: 2.5 + Math.random() * 2.5,
+            tam: 45 + Math.random() * 70, img: FAGULHAS[Math.floor(Math.random() * 3)]};
   }
 
   let atualSim = "flor", anterior = null, troca = 0, legenda = "", nivel = 0, giro = 0, ultimo = performance.now();
+  let tema = "", vio = 0;  // vio: 0 = dourado, 1 = chama violeta (transição suave)
   const dados = new Float32Array(2048);
 
   function escolher(i) {
     const v = $("visual").value;
     return v === "alternar" ? ORDEM[Math.max(i, 0) % ORDEM.length] : v;
   }
-  $("visual").onchange = () => faixa(idx, legenda);
+  $("visual").onchange = () => faixa(idx, legenda, tema);
 
-  function faixa(i, texto) {
+  function faixa(i, texto, novoTema = "") {
     const novo = escolher(i);
     if (novo !== atualSim) { anterior = atualSim; atualSim = novo; troca = performance.now(); }
-    legenda = texto;
+    legenda = texto; tema = novoTema;
   }
 
   function quadro(agora) {
@@ -413,9 +432,10 @@ const VIS = (() => {
     } else nivel += (0 - nivel) * Math.min(1, dt / 2);
 
     const t = agora / 1000, tocando = !!atual;
+    vio += ((tema === "violeta" ? 1 : 0) - vio) * Math.min(1, dt / 1.5);
     giro += dt * (tocando ? 3 : 1.2) * Math.PI / 180;  // graus por segundo
     const fundo = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.65);
-    fundo.addColorStop(0, `rgb(${58 + nivel * 30},${24 + nivel * 10},${104 + nivel * 30})`);
+    fundo.addColorStop(0, `rgb(${58 + vio * 40 + nivel * 30},${24 + vio * 4 + nivel * 10},${104 + vio * 50 + nivel * 30})`);
     fundo.addColorStop(1, "#080418");
     c.fillStyle = fundo; c.fillRect(0, 0, W, H);
     for (const [x, y, b, f] of estrelas) {
@@ -424,18 +444,36 @@ const VIS = (() => {
     const respira = 0.75 + 0.25 * Math.sin(2 * Math.PI * t / 10);
     const brilho = Math.min(1, (tocando ? 0.75 : 0.45) * respira + nivel * 0.5);
     const mistura = anterior ? Math.min(1, (agora - troca) / 2000) : 1;  // troca de símbolo em 2 s
+    // chamas violetas atrás do símbolo
+    if (vio > 0.01 || chamas.length) {
+      while (vio > 0.5 && chamas.length < 140) chamas.push(nova());
+      c.save(); c.globalCompositeOperation = "lighter";
+      for (let k = chamas.length - 1; k >= 0; k--) {
+        const p = chamas[k]; p.vida += dt; p.y -= p.vy * dt;
+        const u = p.vida / p.max;
+        if (u >= 1) { if (vio > 0.5) chamas[k] = nova(); else chamas.splice(k, 1); continue; }
+        const tam = p.tam * (1 - u * 0.6), x = p.x + 12 * Math.sin(p.fase + p.vida * 1.3);
+        c.globalAlpha = vio * Math.sin(Math.PI * u) * (0.7 + nivel * 0.3);  // surge e some devagar
+        c.drawImage(p.img, x - tam / 2, p.y - tam, tam, tam * 2);  // alongada: labareda
+      }
+      c.restore();
+    }
     const desenhar = (nome, alfa) => {
-      const img = simbolo(nome), lado = H * 0.95 * (1 + 0.03 * respira);
-      c.save(); c.translate(W / 2, H / 2); c.rotate(giro); c.globalAlpha = alfa * brilho;
-      c.globalCompositeOperation = "lighter";
-      c.drawImage(img, -lado / 2, -lado / 2, lado, lado);
-      c.globalAlpha = alfa * brilho * 0.6; c.filter = "blur(10px)";  // halo
-      c.drawImage(img, -lado / 2, -lado / 2, lado, lado);
+      const lado = H * 0.95 * (1 + 0.03 * respira);
+      c.save(); c.translate(W / 2, H / 2); c.rotate(giro); c.globalCompositeOperation = "lighter";
+      for (const [img, peso] of [[simbolo(nome, false), 1 - vio], [simbolo(nome, true), vio]]) {
+        if (peso < 0.01) continue;
+        c.filter = "none"; c.globalAlpha = alfa * brilho * peso;
+        c.drawImage(img, -lado / 2, -lado / 2, lado, lado);
+        c.globalAlpha = alfa * brilho * peso * 0.6; c.filter = "blur(10px)";  // halo
+        c.drawImage(img, -lado / 2, -lado / 2, lado, lado);
+      }
       c.restore();
     };
     if (anterior && mistura < 1) desenhar(anterior, 1 - mistura); else anterior = null;
     desenhar(atualSim, mistura);
-    c.globalAlpha = 1; c.fillStyle = OURO; c.textAlign = "center"; c.font = "34px 'Source Sans Pro', sans-serif";
+    c.globalAlpha = 1; c.fillStyle = vio > 0.5 ? "#dcbcff" : OURO; c.textAlign = "center";
+    c.font = "34px 'Source Sans Pro', sans-serif";
     c.fillText(legenda, W / 2, H - 30);
     c.textAlign = "right"; c.font = "18px 'Source Sans Pro', sans-serif"; c.fillStyle = "#a07a1f";
     c.fillText("feito por Elrofs", W - 20, H - 16);

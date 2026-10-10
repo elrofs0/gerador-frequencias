@@ -44,6 +44,8 @@ PRESETS = {
     "174 Hz — Solfeggio: alívio de tensão, segurança": 174.0,
     "285 Hz — Solfeggio: restauração, bem-estar": 285.0,
     "528 Hz — Solfeggio: harmonia, 'frequência do amor'": 528.0,
+    "852 Hz — Solfeggio: intuição, 'Chama Violeta'": 852.0,
+    "963 Hz — Solfeggio: conexão, unidade": 963.0,
 }
 
 
@@ -210,6 +212,8 @@ def main():
     )
 
     with st.container(border=True):
+        chama_violeta()
+    with st.container(border=True):
         controles()
     if st.session_state.get("playlist"):
         with st.container(border=True):
@@ -219,6 +223,20 @@ def main():
                "com fones. Quem tem epilepsia ou sensibilidade a sons e luzes deve consultar um médico antes de usar.")
     st.caption("Senoide pura · 16-bit · 44.1 kHz · Som de fogueira: “Campfire sound ambience”, "
                "Glaneur de sons, [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/), via Wikimedia Commons")
+
+
+def chama_violeta():
+    """Atalho de um clique: frequência baixinha + melodia, em repetição, com chamas violetas."""
+    st.markdown("**💜 Chama Violeta · Saint Germain**")
+    st.caption("Frequência suave ao fundo com melodia ambiente, tocando sem parar, "
+               "e chamas violetas na visualização. Ideal para deixar tocando no notebook.")
+    for col, f in zip(st.columns(2), (852, 963)):
+        if col.button(f"💜 {f} Hz", key=f"violeta{f}", use_container_width=True):
+            st.session_state.setdefault("playlist", []).append({
+                "titulo": f"💜 Chama Violeta · {f} Hz + melodia ambiente · 30 min", "freqs": [f],
+                "seg": 30 * 60, "amb": ["melodia"], "vol": 0.3, "raiz": raiz_musical(f), "pulso": None,
+                "legenda": f"{f} Hz · Chama Violeta", "tema": "violeta"})
+            st.toast("Adicionado à playlist. Aperte ▶ no player lá embaixo.", icon="💜")
 
 
 def controles():
