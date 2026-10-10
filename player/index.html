@@ -24,11 +24,16 @@
   #lista li:last-child {border-bottom:none;}
   #lista li:hover {background:#f6effd;}
   #lista li.on {background:#ece2fa; font-weight:600; color:#5a31b4;}
-  #tela {width:100%; aspect-ratio:16/9; display:block; border-radius:14px; background:#0b0620; margin-bottom:12px;}
-  #tela:fullscreen {border-radius:0;}
+  #tela, #meu {width:100%; aspect-ratio:16/9; display:block; border-radius:14px; background:#0b0620; margin-bottom:12px;}
+  #tela:fullscreen, #meu:fullscreen {border-radius:0;}
+  #meu {display:none;}
+  label.botao {border-radius:999px; padding:10px 20px; font-size:15px; font-weight:600; cursor:pointer;
+               background:#f1e9fc; color:#7b4fd6;}
+  label.botao:focus-within {outline:2px solid #7b4fd6; outline-offset:2px;}
   select {border:1px solid #e4d6f7; border-radius:999px; padding:8px 12px; background:#fff; color:#2e1f4a; font-size:14px;}
 </style>
 <canvas id="tela" width="1280" height="720"></canvas>
+<video id="meu" playsinline></video>
 <div class="p">
   <button id="ant" class="sec ic" title="Faixa anterior (se passou de 3 s, volta ao começo da atual)" aria-label="Faixa anterior">⏮</button>
   <button id="play">▶ Tocar playlist</button>
@@ -44,6 +49,9 @@
     <option value="lotus">🪷 Lótus</option>
   </select>
   <label><input type="checkbox" id="loop" checked> Repetir</label>
+  <label class="botao" title="Toca um vídeo ou áudio do seu computador, em repetição. O arquivo não sai do navegador.">
+    <input type="file" id="arquivo" accept="video/*,audio/*" hidden> 📼 Meu vídeo</label>
+  <button id="fechar" class="sec" hidden>✕ Voltar à playlist</button>
 </div>
 <div class="agora" id="agora"></div>
 <div class="linha"><div class="barra"><div id="prog"></div></div><span class="tempo" id="tempo"></span></div>
@@ -481,8 +489,41 @@ const VIS = (() => {
   }
   requestAnimationFrame(quadro);
 
-  $("cheia").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : tela.requestFullscreen())
+  $("cheia").onclick = () => (document.fullscreenElement ? document.exitFullscreen()
+                              : ($("fechar").hidden ? tela : $("meu")).requestFullscreen())
     .catch(() => { $("agora").textContent = "Tela cheia não permitida aqui: use F11 no navegador."; });
   return {faixa};
 })();
+
+// ---------- Meu vídeo: arquivo do computador tocando em repetição (24 h, se quiser) ----------
+// Lido direto no navegador (URL local): não é enviado ao servidor, então qualquer tamanho serve.
+// Enquanto toca, pede para a tela não apagar (Wake Lock), quando o navegador permite.
+let urlMeu = null, travaTela = null;
+const meu = $("meu");
+async function manterTela() { try { travaTela = await navigator.wakeLock.request("screen"); } catch (e) {} }
+document.addEventListener("visibilitychange", () => { if (!document.hidden && !meu.paused && meu.src) manterTela(); });
+$("arquivo").onchange = async ev => {
+  const arq = ev.target.files[0]; ev.target.value = "";
+  if (!arq) return;
+  if (atual) await $("stop").onclick();  // para a playlist gerada
+  if (urlMeu) URL.revokeObjectURL(urlMeu);
+  urlMeu = URL.createObjectURL(arq);
+  Object.assign(meu, {src: urlMeu, loop: $("loop").checked, controls: true, volume: $("vol").value / 100});
+  meu.style.display = "block"; $("tela").style.display = "none"; $("fechar").hidden = false;
+  $("agora").textContent = `📼 ${arq.name} — ${meu.loop ? "repetindo sem parar" : "tocando uma vez"}`;
+  meu.play().catch(() => {}); manterTela(); ajustarAltura();
+};
+$("fechar").onclick = () => {
+  meu.pause(); meu.removeAttribute("src"); meu.load();
+  if (travaTela) { travaTela.release(); travaTela = null; }
+  meu.style.display = "none"; $("tela").style.display = "block"; $("fechar").hidden = true;
+  $("agora").textContent = ""; ajustarAltura();
+};
+// ▶ da playlist com o vídeo aberto: fecha o vídeo antes (roda antes do handler do botão)
+$("play").addEventListener("click", () => { if (!$("fechar").hidden) $("fechar").onclick(); }, true);
+$("loop").addEventListener("change", () => {
+  meu.loop = $("loop").checked;
+  if (!$("fechar").hidden) $("agora").textContent = $("agora").textContent.replace(/— .*/, meu.loop ? "— repetindo sem parar" : "— tocando uma vez");
+});
+$("vol").addEventListener("input", () => { meu.volume = $("vol").value / 100; });
 </script>

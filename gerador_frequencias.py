@@ -215,9 +215,8 @@ def main():
         chama_violeta()
     with st.container(border=True):
         controles()
-    if st.session_state.get("playlist"):
-        with st.container(border=True):
-            playlist()
+    with st.container(border=True):  # sempre visível: o player também toca "Meu vídeo" sem playlist
+        playlist()
     st.caption("⚠ Este app é para relaxamento e não substitui tratamento médico: os efeitos atribuídos às "
                "frequências não têm comprovação científica. Comece com o volume baixo, principalmente "
                "com fones. Quem tem epilepsia ou sensibilidade a sons e luzes deve consultar um médico antes de usar.")
@@ -342,7 +341,10 @@ PLAYER = components.declare_component(
 
 def playlist():
     st.subheader("🎶 Playlist")
-    lista = st.session_state.playlist
+    lista = st.session_state.setdefault("playlist", [])
+    if not lista:
+        st.caption("Adicione frequências acima, ou toque um vídeo do seu computador em "
+                   "repetição com 📼 Meu vídeo.")
     for i, it in enumerate(lista):
         with st.container(key=f"faixa{i}"):  # classe .st-key-faixaN: mantém o ✕ na mesma linha no celular
             c1, c2 = st.columns([6, 1], vertical_alignment="center")
@@ -351,8 +353,11 @@ def playlist():
                 lista.pop(i)
                 st.rerun()
     total = sum(it["seg"] for it in lista) // 60
-    st.caption(f"Total: {total} min · toca em sequência, sem pausa entre as faixas")
+    if lista:
+        st.caption(f"Total: {total} min · toca em sequência, sem pausa entre as faixas")
     PLAYER(lista=lista, acordes=ACORDES, sinos=SINOS, gravacoes=GRAVACOES, key="player_playlist")
+    if not lista:
+        return
     if FFMPEG:
         video_playlist(lista, total)
     if st.button("Limpar playlist"):
